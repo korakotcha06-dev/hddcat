@@ -1,0 +1,9 @@
+catalog.db*
+dist/
+/assets/
+**/founder.jpg
+*.csv
+catalog.py.orig-backup
+__pycache__/
+.DS_Store
+*.zip

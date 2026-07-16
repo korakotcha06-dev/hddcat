@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HDDCAT — สแกนทุกฮาร์ดดิสก์ ค้นทุกไฟล์ ในที่เดียว (ฟรี, macOS)</title>
+<meta name="description" content="HDDCAT คือเครื่องมือฟรีบน macOS สแกนฮาร์ดดิสก์ทุกลูกเข้า catalog เดียว ค้นไฟล์เจอในไม่ถึงวินาที โดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้า/วันที่อัตโนมัติ">
+<link rel="canonical" href="__CANONICAL__/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="HDDCAT — สแกนทุกฮาร์ดดิสก์ ค้นทุกไฟล์ ในที่เดียว (ฟรี, macOS)">
+<meta property="og:description" content="HDDCAT คือเครื่องมือฟรีบน macOS สแกนฮาร์ดดิสก์ทุกลูกเข้า catalog เดียว ค้นไฟล์เจอในไม่ถึงวินาที โดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้า/วันที่อัตโนมัติ">
+<meta property="og:image" content="assets/hero.jpg">
+<meta property="og:url" content="__CANONICAL__/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOSIgZmlsbD0iIzY2MzNFRSIvPjxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDAsNSkgc2NhbGUoMC44NSkiIGZpbGw9IiNmZmYiPjxyZWN0IHg9IjIiIHk9IjE2LjUiIHdpZHRoPSIyOCIgaGVpZ2h0PSIzLjUiIHJ4PSIxLjc1IiBvcGFjaXR5PSIuNDUiLz48cGF0aCBkPSJNNi4zIDE2LjVjLTEuOSAwLTMuMy0xLjMtMy4zLTMgMC0uOS42LTEuNiAxLjQtMS45QzUuMyA4IDguNiA1LjQgMTIuNiA1LjRjMi4zIDAgNC40Ljg1IDUuOSAyLjJsLjUtMi4zYy4wNy0uMzMuNS0uNDIuNy0uMTVsMS42IDIuMWMuNS0uMSAxLS4xIDEuNS0uMDJsMS43LTJjLjIyLS4yNi42NC0uMTUuNy4xOGwuNCAyLjM1YzEuMy45IDIuMSAyLjMgMi4xIDMuOSAwIDEuNC0uNjMgMi42OC0xLjY2IDMuNTguMDQuMTUuMDYuMy4wNi40NyAwIC45NS0uODMgMS43Mi0xLjg1IDEuNzJINi4zeiIvPjwvZz48L3N2Zz4=">
+<!-- fonts: same families as the HDDCAT app -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "HDDCAT",
+  "operatingSystem": "macOS",
+  "applicationCategory": "UtilitiesApplication",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "THB" },
+  "license": "https://opensource.org/licenses/MIT",
+  "codeRepository": "https://github.com/korakotcha06-dev/hddcat",
+  "author": { "@type": "Organization", "name": "Touchnewmedia Co., Ltd." }
+}
+</script>
+<style>
+/* ---- design tokens (same as the HDDCAT app :root) ---- */
+:root {
+  --color-primary: #6633EE;
+  --color-secondary: #030015;
+  --color-bg-1: #FBFCFD;
+  --color-home-bg: #FFF8F3;
+  --color-border: #FFDBBF;
+  --color-heading-1: #05011C;
+  --color-body-1: #404040;
+  --color-title: #26262C;
+  --color-white: #fff;
+  --counter-title: #717383;
+  --p-regular: 400; --p-medium: 500; --p-semi-bold: 600; --p-bold: 700;
+  --transition: all 0.4s;
+  --font-primary: "Outfit", "Noto Sans Thai", -apple-system, sans-serif;
+  --font-secondary: "Inter", "Noto Sans Thai", -apple-system, sans-serif;
+  --font-body: var(--font-secondary);
+  --font-size-b1: 16px;
+  --radius-btn: 34px;
+  --radius-card: 14px;
+  --shadow-card: 0 4px 24px rgba(5, 1, 28, 0.06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: var(--font-size-b1); }
+body {
+  font-family: var(--font-body);
+  background: var(--color-home-bg);
+  color: var(--color-body-1);
+  min-height: 100vh;
+}
+h1,h2,h3,h4 { font-family: var(--font-primary); color: var(--color-heading-1); }
+
+/* ---- top bar ---- */
+.topbar { position: sticky; top: 0; z-index: 10; padding: 10px 20px;
+  background: transparent; }
+.topbar-inner {
+  max-width: 1280px; margin: 0 auto; height: 60px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 0 10px 0 22px;
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(102, 51, 238, 0.10);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(5, 1, 28, 0.06);
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-mark { width: 32px; height: 32px; border-radius: 9px;
+  background: linear-gradient(135deg, var(--color-primary), #9B7BFF);
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 12px rgba(102, 51, 238, 0.35); }
+.brand-word { font-family: var(--font-primary); font-size: 19px; font-weight: var(--p-medium);
+  color: var(--color-heading-1); }
+.brand-word b { font-weight: var(--p-bold); color: var(--color-primary); }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+
+/* ---- buttons ---- */
+.btn {
+  font-family: var(--font-primary); font-weight: var(--p-medium); font-size: 15px;
+  letter-spacing: 0.4px; line-height: 1;
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 12px 24px; border-radius: var(--radius-btn);
+  background: var(--color-primary); color: var(--color-white);
+  border: 1px solid var(--color-primary); cursor: pointer;
+  transition: var(--transition); text-decoration: none;
+}
+.btn:hover { opacity: 0.88; transform: translateY(-1px); }
+.btn.btn-border { background: transparent; color: var(--color-primary);
+  border: 1px solid rgba(102, 51, 238, 0.4); }
+.btn.btn-border:hover { background: rgba(102, 51, 238, 0.07); }
+
+/* ---- home hero (mirrors the HDDCAT app) ---- */
+.hero-section { position: relative; overflow: hidden; margin-top: -80px; }
+.hero-blob { position: absolute; border-radius: 50%; filter: blur(90px); pointer-events: none; }
+.hero-blob-1 { width: 600px; height: 600px; top: -160px; left: -160px;
+  background: rgba(102, 51, 238, 0.16); }
+.hero-blob-2 { width: 550px; height: 550px; top: 40px; right: -180px;
+  background: rgba(255, 215, 183, 0.55); }
+.hero-content { position: relative; z-index: 1; min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: 128px 20px 48px; }
+.hero-badge { text-transform: uppercase; letter-spacing: 2px; font-size: 12px;
+  font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  color: var(--color-primary); background: rgba(102, 51, 238, 0.08);
+  border: 1px solid rgba(102, 51, 238, 0.25); border-radius: 34px;
+  padding: 8px 20px; margin-bottom: 26px; }
+.hero-h1 { font-family: var(--font-primary); font-weight: var(--p-bold);
+  font-size: clamp(44px, 6vw, 78px); line-height: 1.08; color: var(--color-heading-1);
+  margin-bottom: 18px; }
+.hero-tagline { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  font-size: clamp(18px, 2.2vw, 26px); color: var(--color-primary); margin-bottom: 20px; }
+.hero-desc { max-width: 760px; color: var(--color-body-1); font-size: 16px;
+  line-height: 1.75; margin-bottom: 32px; }
+.hero-cta { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
+  margin-bottom: 0; }
+.dl-free { padding: 17px 34px; font-size: 17px; gap: 12px;
+  box-shadow: 0 8px 24px rgba(102, 51, 238, 0.30); }
+.dl-free svg { flex: none; }
+.dl-free.compact { padding: 10px 22px; font-size: 14px; gap: 8px;
+  box-shadow: 0 4px 14px rgba(102, 51, 238, 0.28); }
+.dl-free.compact svg { width: 16px; height: 16px; }
+.hero-cta-sub { font-size: 12.5px; color: var(--counter-title); margin-top: 10px;
+  margin-bottom: 46px; }
+.hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 18px; max-width: 960px; width: 100%; }
+.hero-stat-num { font-family: var(--font-primary); font-weight: var(--p-bold);
+  font-size: clamp(28px, 3vw, 40px); color: var(--color-primary); margin-bottom: 4px; }
+.hero-stat-label { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  font-size: 13px; color: var(--color-title); line-height: 1.5; }
+.hero-stat-label .hero-stat-th { display: block;
+  font-weight: var(--p-regular); font-size: 12px; color: var(--counter-title); }
+.hero-visual { width: 92%; max-width: 1180px; margin: 56px auto 0; }
+.hero-visual img { width: 100%; display: block; border-radius: var(--radius-card);
+  border: 1px solid var(--color-border); box-shadow: 0 30px 80px rgba(5, 1, 28, 0.18); }
+.hero-strip { position: relative; width: 92%; max-width: 1180px; margin: 72px auto 0;
+  border-radius: var(--radius-card); overflow: hidden; box-shadow: var(--shadow-card); }
+.hero-strip img { width: 100%; display: block; }
+.hero-strip-text { position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 32px;
+  background: linear-gradient(0deg, rgba(5,1,28,0.78), rgba(5,1,28,0)); }
+.hero-strip-text h3 { color: var(--color-white); font-size: clamp(20px, 2.6vw, 30px);
+  margin-bottom: 4px; }
+.hero-strip-text p { color: rgba(255,255,255,0.85); font-size: 13.5px; }
+.hero-features { padding: 88px 24px 0; }
+.hero-features-h2 { text-align: center; font-family: var(--font-primary);
+  font-size: clamp(28px, 3.6vw, 44px); margin-bottom: 8px; }
+.hero-features-sub { text-align: center; font-size: 15px; color: var(--counter-title);
+  margin-bottom: 36px; }
+.hero-feature-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 18px; max-width: 1140px; margin: 0 auto; }
+.card { background: var(--color-white); border: 1px solid var(--color-border);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 20px; }
+.hero-feature-emoji { font-size: 30px; margin-bottom: 10px; }
+.hero-feature-cards h3 { font-family: var(--font-primary); font-size: 18px; margin-bottom: 6px; }
+.hero-feature-desc { font-size: 13.5px; color: var(--counter-title); line-height: 1.7; }
+
+.founder { display: flex; align-items: center; justify-content: center; gap: 48px;
+  max-width: 980px; margin: 88px auto 0; padding: 0 24px; flex-wrap: wrap; }
+.founder img { width: 250px; border-radius: var(--radius-card);
+  box-shadow: 0 20px 60px rgba(5, 1, 28, 0.15); display: block; }
+.founder-text { max-width: 520px; }
+.founder-quote { font-family: var(--font-primary); font-size: clamp(17px, 2vw, 21px);
+  line-height: 1.65; color: var(--color-heading-1); margin-bottom: 18px; }
+.founder-name { font-family: var(--font-primary); font-weight: var(--p-bold);
+  font-size: 16px; color: var(--color-primary); }
+.founder-title { font-size: 13px; color: var(--counter-title); }
+@media (max-width: 700px) { .founder { flex-direction: column; text-align: center; } }
+
+/* ---- FAQ ---- */
+.faq-section { max-width: 760px; margin: 96px auto 0; padding: 0 24px; }
+.faq-section h2 { text-align: center; font-family: var(--font-primary);
+  font-size: clamp(28px, 3.6vw, 44px); margin-bottom: 40px; }
+.faq-item { margin-bottom: 30px; }
+.faq-item h3 { font-size: 18px; color: var(--color-heading-1); margin-bottom: 8px; }
+.faq-item p { font-size: 14.5px; color: var(--color-body-1); line-height: 1.75; }
+
+/* ---- GitHub / BMC row ---- */
+.hero-social { display: flex; gap: 12px; justify-content: center; align-items: center;
+  flex-wrap: wrap; margin: 56px 0 0; }
+.ghbtn { display: inline-flex; align-items: center; gap: 9px; font-family: inherit;
+  font-weight: var(--p-medium); font-size: 14.5px; text-decoration: none;
+  color: var(--color-heading-1); background: #fff; border: 1px solid rgba(5, 1, 28, 0.18);
+  border-radius: 34px; padding: 11px 22px; cursor: pointer; }
+.ghbtn svg { width: 18px; height: 18px; }
+.bmc-y { display: inline-flex; align-items: center; gap: 9px; font-family: inherit;
+  font-weight: var(--p-semi-bold); font-size: 14.5px; text-decoration: none;
+  color: #0D0C22; background: #FFDD00; border: none; border-radius: 34px;
+  padding: 12px 22px; cursor: pointer; box-shadow: 0 6px 18px rgba(255, 221, 0, 0.4); }
+.hero-closing { text-align: center; font-size: 13px; color: var(--counter-title);
+  margin: 20px 0 24px; }
+
+/* ---- footer ---- */
+footer { text-align: center; padding: 88px 24px 48px; }
+footer .foot-copy { font-size: 13px; color: var(--counter-title); margin-top: 20px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="22" height="16" viewBox="0 0 32 22" fill="#fff"><rect x="2" y="16.5" width="28" height="3.5" rx="1.75" opacity=".45"/><path d="M6.3 16.5c-1.9 0-3.3-1.3-3.3-3 0-.9.6-1.6 1.4-1.9C5.3 8 8.6 5.4 12.6 5.4c2.3 0 4.4.85 5.9 2.2l.5-2.3c.07-.33.5-.42.7-.15l1.6 2.1c.5-.1 1-.1 1.5-.02l1.7-2c.22-.26.64-.15.7.18l.4 2.35c1.3.9 2.1 2.3 2.1 3.9 0 1.4-.63 2.68-1.66 3.58.04.15.06.3.06.47 0 .95-.83 1.72-1.85 1.72H6.3z"/></svg>
+      </span>
+      <span class="brand-word">HDD<b>CAT</b></span>
+    </div>
+    <div class="topbar-right">
+      <a class="ghbtn" href="https://github.com/korakotcha06-dev/hddcat" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="#05011C"><path fill-rule="evenodd" d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.084 1.84 1.236 1.84 1.236 1.07 1.835 2.807 1.305 3.492.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/></svg>GitHub</a>
+      <a class="bmc-y" href="https://www.buymeacoffee.com/korakot" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a class="btn dl-free compact" href="HDDCAT.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
+    </div>
+  </div>
+</header>
+
+<section class="hero-section">
+  <div class="hero-blob hero-blob-1"></div>
+  <div class="hero-blob hero-blob-2"></div>
+  <div class="hero-content">
+    <div class="hero-badge">HDD CATALOG — TOUCHNEWMEDIA EDITION</div>
+    <h1 class="hero-h1">Every File You Own.<br>One Search Away.</h1>
+    <p class="hero-tagline">พลังของคลังไฟล์นับล้าน — รวมทุกไดรฟ์ ค้นครั้งเดียว เจอทันที</p>
+    <p class="hero-desc">Scan millions of files in seconds. Organize a decade of client work automatically. Find anything — even on drives sitting on a shelf.<br>สแกนไฟล์เป็นล้านในไม่กี่วินาที จัดเรียงงานทั้งทศวรรษตามลูกค้าและวันที่ แล้วค้นเจอทุกไฟล์ แม้ไดรฟ์จะไม่ได้เสียบอยู่</p>
+    <div class="hero-cta">
+      <a class="btn dl-free" id="hero-dl" href="HDDCAT.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
+      <a class="btn btn-border" href="#features">ดูฟีเจอร์ ↓</a>
+    </div>
+    <div class="hero-cta-sub">macOS · ฟรี · open-source</div>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <div class="hero-stat-num" id="hero-stat-files">0</div>
+        <div class="hero-stat-label">Files Indexed<span class="hero-stat-th">ไฟล์ในคลัง</span></div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-num" id="hero-stat-drives">0</div>
+        <div class="hero-stat-label">Drives United<span class="hero-stat-th">ไดรฟ์ที่รวมพลัง</span></div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-num" id="hero-stat-size">0B</div>
+        <div class="hero-stat-label">Under Command<span class="hero-stat-th">ขนาดรวมทั้งหมด</span></div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-num">&lt;1s</div>
+        <div class="hero-stat-label">To Find Anything<span class="hero-stat-th">ค้นเจอทุกไฟล์</span></div>
+      </div>
+    </div>
+    <div class="hero-visual"><img src="assets/hero.jpg" alt="กองฮาร์ดดิสก์ยุ่งเหยิง — ลูกเดียวที่เรืองแสงคือลูกที่มีไฟล์ที่คุณตามหา" loading="lazy"></div>
+  </div>
+</section>
+
+<div class="hero-strip">
+  <img src="assets/shelf.jpg" alt="" loading="lazy">
+  <div class="hero-strip-text">
+    <h3>“หาไฟล์เดียว... แต่ไม่รู้อยู่ลูกไหน”</h3>
+    <p>ปัญหาที่ HDD Catalog เกิดมาเพื่อจบ — ค้นครั้งเดียว รู้ทันทีว่าอยู่ไดรฟ์ไหน โฟลเดอร์ไหน แม้ไดรฟ์จะวางอยู่บนชั้น</p>
+  </div>
+</div>
+
+<div class="hero-features" id="features">
+  <h2 class="hero-features-h2">The Power of HDD Catalog</h2>
+  <p class="hero-features-sub">เครื่องมือเดียว จัดการทุกไดรฟ์ที่คุณมี</p>
+  <div class="hero-feature-cards">
+    <div class="card">
+      <div class="hero-feature-emoji">⚡</div>
+      <h3>Scan at Light Speed</h3>
+      <p class="hero-feature-desc">สแกนไฟล์เป็นล้านในไม่กี่วินาที — เสียบไดรฟ์ปุ๊บ ปุ่มสแกนเด้งทันที</p>
+    </div>
+    <div class="card">
+      <div class="hero-feature-emoji">🔌</div>
+      <h3>Search the Unplugged</h3>
+      <p class="hero-feature-desc">รู้ว่าไฟล์อยู่ไดรฟ์ลูกไหนโดยไม่ต้องเสียบสักลูก — ค้นจากชั้นวางได้เลย</p>
+    </div>
+    <div class="card">
+      <div class="hero-feature-emoji">🗂️</div>
+      <h3>A Decade, Organized</h3>
+      <p class="hero-feature-desc">จัดเรียงงานทุกยุคตามลูกค้าและวันที่อัตโนมัติ — อ่านได้ทั้ง ค.ศ. และ พ.ศ.</p>
+    </div>
+    <div class="card">
+      <div class="hero-feature-emoji">♻️</div>
+      <h3>Reclaim Your Terabytes</h3>
+      <p class="hero-feature-desc">จับไฟล์ซ้ำข้ามไดรฟ์ คืนพื้นที่หลายร้อย GB ในคลิกเดียว</p>
+    </div>
+  </div>
+</div>
+
+<div class="founder" id="founder-sec">
+  <img src="assets/founder.jpg" alt="Korakot Changpan"
+       onerror="document.getElementById('founder-sec').style.display='none'">
+  <div class="founder-text">
+    <p class="founder-quote">“ผมสร้าง HDD Catalog เพราะเจอปัญหานี้เองทุกวัน — งานสิบปีกระจายอยู่บนไดรฟ์นับสิบลูก ตอนนี้ทุกไฟล์ตอบได้ในการค้นครั้งเดียว”</p>
+    <p class="founder-name">Korakot Changpan</p>
+    <p class="founder-title">CEO of Touchnewmedia</p>
+  </div>
+</div>
+
+<div class="faq-section">
+  <h2>คำถามที่พบบ่อย</h2>
+  <div class="faq-item">
+    <h3>HDDCAT คืออะไร?</h3>
+    <p>HDDCAT คือเครื่องมือฟรีบน macOS ที่สแกนฮาร์ดดิสก์ทุกลูกของคุณเข้า catalog เดียว ทำให้ค้นหาไฟล์เจอในไม่ถึงวินาทีโดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้าและวันที่ให้อัตโนมัติ (อ่านได้ทั้ง พ.ศ. และ ค.ศ.) และหาไฟล์ซ้ำข้ามไดรฟ์เพื่อคืนพื้นที่</p>
+  </div>
+  <div class="faq-item">
+    <h3>ข้อมูลของฉันไปอยู่ที่ไหน?</h3>
+    <p>อยู่ในเครื่องคุณ 100% — catalog ทั้งหมดเก็บในไฟล์ catalog.db ข้างตัวโปรแกรม ไม่มีเซิร์ฟเวอร์ ไม่มี cloud และไม่มีการส่งข้อมูลใดออกจากเครื่อง</p>
+  </div>
+  <div class="faq-item">
+    <h3>ต้องมีอะไรบ้าง?</h3>
+    <p>Mac หนึ่งเครื่อง — แตก zip แล้วคลิกขวา &gt; Open ที่ "เปิด HDDCAT.command" ครั้งแรกครั้งเดียว ถ้าเครื่องยังไม่มี python3 ระบบจะชวนติดตั้งให้อัตโนมัติ</p>
+  </div>
+  <div class="faq-item">
+    <h3>ฟรีจริงไหม?</h3>
+    <p>ฟรีจริงและเป็น open-source สัญญา MIT — ดูซอร์สโค้ดทั้งหมดได้บน GitHub ถ้าอยากสนับสนุนผู้พัฒนา เลี้ยงกาแฟได้ที่ Buy Me a Coffee</p>
+  </div>
+</div>
+
+<footer>
+  <div class="hero-social">
+    <a class="ghbtn" href="https://github.com/korakotcha06-dev/hddcat" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="#05011C"><path fill-rule="evenodd" d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.084 1.84 1.236 1.84 1.236 1.07 1.835 2.807 1.305 3.492.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/></svg>GitHub</a>
+    <a class="bmc-y" href="https://www.buymeacoffee.com/korakot" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+  </div>
+  <p class="foot-copy">© 2026 Touchnewmedia Co., Ltd. · MIT License · Made with 🐈 by Touchnewmedia</p>
+</footer>
+
+<script>
+(function () {
+  function human(n) {
+    n = Number(n) || 0;
+    for (const u of ["B", "KB", "MB", "GB", "TB"]) {
+      if (Math.abs(n) < 1024) return u === "B" ? `${n.toFixed(0)}B` : `${n.toFixed(1)}${u}`;
+      n /= 1024;
+    }
+    return `${n.toFixed(1)}PB`;
+  }
+  const targets = { files: 2000000, drives: 24, bytes: 22 * Math.pow(1024, 4) };
+  const dur = 1200, start = performance.now();
+  const easeOut = t => 1 - Math.pow(1 - t, 3);
+  function frame(now) {
+    const e = easeOut(Math.min(1, (now - start) / dur));
+    document.getElementById("hero-stat-files").textContent =
+      e >= 1 ? "2,000,000+" : Math.round(targets.files * e).toLocaleString();
+    document.getElementById("hero-stat-drives").textContent =
+      Math.round(targets.drives * e).toLocaleString();
+    document.getElementById("hero-stat-size").textContent =
+      e >= 1 ? "22TB" : human(targets.bytes * e);
+    if (e < 1) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
