@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HDDCAT — cat-sleep Lottie preview</title>
+<style>
+  body { background: #FFF8F3; display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; margin: 0; font-family: -apple-system, sans-serif; }
+  #anim { width: 256px; height: 256px; }
+</style>
+</head>
+<body>
+<div id="anim"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+<script>
+  lottie.loadAnimation({
+    container: document.getElementById('anim'),
+    renderer: 'svg',
+    loop: true,
+    autoplay: true,
+    path: 'cat-sleep.json'
+  });
+</script>
+</body>
+</html>
