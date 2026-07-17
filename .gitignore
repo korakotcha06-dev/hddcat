@@ -12,3 +12,4 @@ demo-catalog.db*
 icon-work/*
 !icon-work/icon.svg
 !icon-work/HDDCAT.icns
+promo/
