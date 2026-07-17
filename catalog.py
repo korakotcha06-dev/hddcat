@@ -31,7 +31,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import argparse
 import json
@@ -781,7 +781,13 @@ def cmd_build_dist(args):
     """Build dist/HDDCAT.zip - a self-contained HDDCAT/ folder with a real,
     double-clickable HDDCAT.app (cat icon, shows in the Dock) plus a plain
     catalog.py copy for Terminal users, README and LICENSE. Never bundles
-    catalog.db or assets/ - those are per-machine/private."""
+    catalog.db - that's per-machine/private. DOES bundle exactly 3 public
+    marketing images (hero.jpg, shelf.jpg, founder.jpg - already public on
+    the live site/landing page) into Contents/Resources/assets/ so the
+    Home tab's web UI has something to serve via GET /assets/<name> when
+    running from inside the .app (assets_dir there resolves next to
+    __file__, i.e. Contents/Resources/assets). No other file from assets/
+    is bundled."""
     root = os.path.dirname(os.path.abspath(__file__))
     dist_dir = os.path.join(root, "dist")
     os.makedirs(dist_dir, exist_ok=True)
@@ -795,6 +801,17 @@ def cmd_build_dist(args):
         sys.exit(1)
     with open(icns_path, "rb") as f:
         icns_bytes = f.read()
+
+    bundled_images = ["hero.jpg", "shelf.jpg", "founder.jpg"]
+    image_paths = {}
+    for img in bundled_images:
+        p = os.path.join(root, "assets", img)
+        if not os.path.isfile(p):
+            print(f"ERROR: ไม่พบรูป {p}")
+            print("ต้องมี hero.jpg, shelf.jpg, founder.jpg ใน assets/ ก่อนรัน build-dist "
+                  "(ใช้สำหรับ Home tab ของ .app)")
+            sys.exit(1)
+        image_paths[img] = p
 
     plist = _DIST_INFO_PLIST.format(version=__version__)
 
@@ -826,6 +843,13 @@ def cmd_build_dist(args):
         # HDDCAT.app/Contents/Resources/catalog.py (what the launcher actually runs)
         zf.write(os.path.abspath(__file__), "HDDCAT/HDDCAT.app/Contents/Resources/catalog.py")
         entries.append("HDDCAT/HDDCAT.app/Contents/Resources/catalog.py")
+
+        # HDDCAT.app/Contents/Resources/assets/ - the 3 public marketing images only,
+        # so the Home tab's hero/story-strip/founder images don't 404 inside the .app
+        for img in bundled_images:
+            dest = f"HDDCAT/HDDCAT.app/Contents/Resources/assets/{img}"
+            zf.write(image_paths[img], dest)
+            entries.append(dest)
 
         zi = zipfile.ZipInfo("HDDCAT/README.md", date_time=now)
         zi.compress_type = zipfile.ZIP_DEFLATED
@@ -1573,11 +1597,13 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
         <div class="hero-stat-label">To Find Anything<span class="hero-stat-th">ค้นเจอทุกไฟล์</span></div>
       </div>
     </div>
-    <div class="hero-visual"><img src="/assets/hero.jpg" alt="กองฮาร์ดดิสก์ยุ่งเหยิง — ลูกเดียวที่เรืองแสงคือลูกที่มีไฟล์ที่คุณตามหา" loading="lazy"></div>
+    <div class="hero-visual"><img src="/assets/hero.jpg" alt="กองฮาร์ดดิสก์ยุ่งเหยิง — ลูกเดียวที่เรืองแสงคือลูกที่มีไฟล์ที่คุณตามหา" loading="lazy"
+      onerror="this.closest('.hero-visual,.hero-strip')?.remove()"></div>
   </div>
 
   <div class="hero-strip">
-    <img src="/assets/shelf.jpg" alt="" loading="lazy">
+    <img src="/assets/shelf.jpg" alt="" loading="lazy"
+      onerror="this.closest('.hero-visual,.hero-strip')?.remove()">
     <div class="hero-strip-text">
       <h3>“หาไฟล์เดียว... แต่ไม่รู้อยู่ลูกไหน”</h3>
       <p>ปัญหาที่ HDD Catalog เกิดมาเพื่อจบ — ค้นครั้งเดียว รู้ทันทีว่าอยู่ไดรฟ์ไหน โฟลเดอร์ไหน แม้ไดรฟ์จะวางอยู่บนชั้น</p>
