@@ -165,6 +165,22 @@ h1,h2,h3,h4 { font-family: var(--font-primary); color: var(--color-heading-1); }
 .step-card img { width: 100%; display: block; border-radius: 10px; margin-top: 16px;
   border: 1px solid var(--color-border); }
 
+/* ---- zip contents card ---- */
+.zip-contents { background: var(--color-bg-1); border: 1px solid var(--color-border);
+  border-radius: 12px; padding: 16px 20px; margin-top: 16px; position: relative; }
+.zc-title { font-family: var(--font-primary); font-weight: 600; font-size: 14px;
+  color: var(--color-heading-1); margin-bottom: 10px; }
+.zc-row { display: flex; gap: 12px; align-items: flex-start; padding: 7px 0;
+  border-top: 1px dashed rgba(255,219,191,.6); }
+.zc-row:first-of-type { border-top: none; }
+.zc-icon { width: 24px; text-align: center; flex: none; font-size: 16px; }
+.zc-icon svg { vertical-align: -3px; }
+.zc-row b { font-family: var(--font-primary); font-size: 14px; color: var(--color-title);
+  display: block; font-weight: var(--p-semi-bold); }
+.zc-row .zc-desc { font-size: 12.5px; color: var(--counter-title); display: block; }
+#cat-lottie-howto { position: absolute; width: 110px; height: 110px; right: 14px; top: -91px;
+  pointer-events: none; }
+
 /* ---- tips ---- */
 .tips-section { max-width: 760px; margin: 72px auto 0; padding: 0 24px; }
 .tips-section h2 { text-align: center; font-family: var(--font-primary);
@@ -235,6 +251,14 @@ body { overflow-x: hidden; }
     <div class="step-num">1</div>
     <h3>ดาวน์โหลดแล้วแตก zip</h3>
     <p>กดปุ่ม Download Free แล้วแตกไฟล์ HDDCAT.zip — ข้างในมี HDDCAT.app ลากไปไว้โฟลเดอร์ Applications ได้เลย</p>
+    <div class="zip-contents">
+      <div id="cat-lottie-howto" aria-hidden="true"></div>
+      <div class="zc-title">📦 แตก HDDCAT.zip แล้วจะเจอ:</div>
+      <div class="zc-row"><span class="zc-icon"><svg width="20" height="14" viewBox="0 0 32 22" fill="#6633EE"><rect x="2" y="16.5" width="28" height="3.5" rx="1.75" opacity=".45"/><path d="M6.3 16.5c-1.9 0-3.3-1.3-3.3-3 0-.9.6-1.6 1.4-1.9C5.3 8 8.6 5.4 12.6 5.4c2.3 0 4.4.85 5.9 2.2l.5-2.3c.07-.33.5-.42.7-.15l1.6 2.1c.5-.1 1-.1 1.5-.02l1.7-2c.22-.26.64-.15.7.18l.4 2.35c1.3.9 2.1 2.3 2.1 3.9 0 1.4-.63 2.68-1.66 3.58.04.15.06.3.06.47 0 .95-.83 1.72-1.85 1.72H6.3z"/></svg></span><div><b>HDDCAT.app</b><span class="zc-desc">ตัวแอป — ดับเบิลคลิกเปิดใช้ได้เลย ลากไป Applications ได้</span></div></div>
+      <div class="zc-row"><span class="zc-icon">🐍</span><div><b>catalog.py</b><span class="zc-desc">ตัวเดียวกับในแอป สำหรับสาย Terminal/CLI</span></div></div>
+      <div class="zc-row"><span class="zc-icon">📄</span><div><b>README.md</b><span class="zc-desc">คู่มือฉบับย่อ ภาษาไทย</span></div></div>
+      <div class="zc-row"><span class="zc-icon">⚖️</span><div><b>LICENSE</b><span class="zc-desc">MIT — ฟรี ใช้/แก้/แจกต่อได้</span></div></div>
+    </div>
   </div>
 
   <div class="step-card">
@@ -288,5 +312,14 @@ body { overflow-x: hidden; }
   <p class="foot-copy">© 2026 <a href="https://www.thetnm.com" target="_blank" rel="noopener">Touchnewmedia Co., Ltd.</a> · MIT License · Made with <svg width="17" height="12" viewBox="0 0 32 22" fill="#6633EE" style="vertical-align:-1px"><rect x="2" y="16.5" width="28" height="3.5" rx="1.75" opacity=".45"/><path d="M6.3 16.5c-1.9 0-3.3-1.3-3.3-3 0-.9.6-1.6 1.4-1.9C5.3 8 8.6 5.4 12.6 5.4c2.3 0 4.4.85 5.9 2.2l.5-2.3c.07-.33.5-.42.7-.15l1.6 2.1c.5-.1 1-.1 1.5-.02l1.7-2c.22-.26.64-.15.7.18l.4 2.35c1.3.9 2.1 2.3 2.1 3.9 0 1.4-.63 2.68-1.66 3.58.04.15.06.3.06.47 0 .95-.83 1.72-1.85 1.72H6.3z"/></svg> by <a href="https://www.thetnm.com" target="_blank" rel="noopener">Touchnewmedia</a></p>
 </footer>
 
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+  var el = document.getElementById("cat-lottie-howto");
+  if (el && window.lottie) {
+    lottie.loadAnimation({ container: el, renderer: "svg", loop: true, autoplay: true, path: "assets/cat-sleep.json" });
+  }
+});
+</script>
 </body>
 </html>
