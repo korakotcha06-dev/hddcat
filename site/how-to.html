@@ -9,7 +9,7 @@
 <meta property="og:type" content="website">
 <meta property="og:title" content="วิธีใช้ HDDCAT — เริ่มจากศูนย์ถึงค้นเจอทุกไฟล์ใน 5 นาที">
 <meta property="og:description" content="วิธีใช้ HDDCAT ทีละขั้นตอน — ดาวน์โหลด แตก zip เปิดโปรแกรม สแกนไดรฟ์ลูกแรก ค้นไฟล์ข้ามทุกไดรฟ์ และหาไฟล์ซ้ำคืนพื้นที่ ใช้เวลาไม่ถึง 5 นาที">
-<meta property="og:image" content="assets/howto-library.jpg">
+<meta property="og:image" content="assets/howto-library-v2.jpg">
 <meta property="og:url" content="__CANONICAL__/how-to.html">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOSIgZmlsbD0iIzY2MzNFRSIvPjxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDAsNSkgc2NhbGUoMC44NSkiIGZpbGw9IiNmZmYiPjxyZWN0IHg9IjIiIHk9IjE2LjUiIHdpZHRoPSIyOCIgaGVpZ2h0PSIzLjUiIHJ4PSIxLjc1IiBvcGFjaXR5PSIuNDUiLz48cGF0aCBkPSJNNi4zIDE2LjVjLTEuOSAwLTMuMy0xLjMtMy4zLTMgMC0uOS42LTEuNiAxLjQtMS45QzUuMyA4IDguNiA1LjQgMTIuNiA1LjRjMi4zIDAgNC40Ljg1IDUuOSAyLjJsLjUtMi4zYy4wNy0uMzMuNS0uNDIuNy0uMTVsMS42IDIuMWMuNS0uMSAxLS4xIDEuNS0uMDJsMS43LTJjLjIyLS4yNi42NC0uMTUuNy4xOGwuNCAyLjM1YzEuMy45IDIuMSAyLjMgMi4xIDMuOSAwIDEuNC0uNjMgMi42OC0xLjY2IDMuNTguMDQuMTUuMDYuMy4wNi40NyAwIC45NS0uODMgMS43Mi0xLjg1IDEuNzJINi4zeiIvPjwvZz48L3N2Zz4=">
@@ -219,28 +219,28 @@ footer .foot-copy { font-size: 13px; color: var(--counter-title); margin-top: 20
     <div class="step-num">2</div>
     <h3>เปิดครั้งแรก: คลิกขวา > Open</h3>
     <p>คลิกขวาที่ HDDCAT.app แล้วเลือก Open — ครั้งแรกครั้งเดียว macOS จะถามยืนยันเพราะแอปมาจากอินเทอร์เน็ต จากนั้นเบราว์เซอร์จะเปิด HDDCAT ขึ้นมาเอง ไอคอนแมวจะอยู่ใน Dock — อยากปิดเมื่อไหร่ คลิกขวาที่ไอคอนแล้ว Quit · ถ้าเครื่องยังไม่มี python3 ระบบจะเด้งชวนติดตั้ง Command Line Tools ให้กด Install</p>
-    <img src="assets/howto-home.jpg" alt="หน้าแรก HDDCAT เมื่อเปิดขึ้นมา" loading="lazy">
+    <img src="assets/howto-home-v2.jpg" alt="หน้าแรก HDDCAT เมื่อเปิดขึ้นมา" loading="lazy">
   </div>
 
   <div class="step-card">
     <div class="step-num">3</div>
     <h3>สแกนไดรฟ์ลูกแรก</h3>
     <p>เสียบ HDD แล้ว HDDCAT จะเด้งถามเองว่า "สแกนเลยไหม" — หรือไปที่แท็บสแกน ใส่ path ของไดรฟ์กับตั้งชื่อ label · ทิป: ตั้ง label ให้ตรงกับสติกเกอร์ที่แปะบนไดรฟ์จริง เวลาค้นเจอจะได้หยิบถูกลูกทันที</p>
-    <img src="assets/howto-scan.jpg" alt="แท็บสแกนไดรฟ์" loading="lazy">
+    <img src="assets/howto-scan-v2.jpg" alt="แท็บสแกนไดรฟ์" loading="lazy">
   </div>
 
   <div class="step-card">
     <div class="step-num">4</div>
     <h3>ค้นทุกอย่างจากที่เดียว</h3>
     <p>แท็บคลังงานรวมทุกไดรฟ์ไว้ในตารางเดียว — พิมพ์ค้นชื่อลูกค้า ชื่องาน หรือชื่อไฟล์ กรองตามไดรฟ์หรือประเภทงาน คลิกที่แถวเพื่อดูไฟล์ข้างในได้เลย และทั้งหมดนี้ทำได้แม้ไดรฟ์จะไม่ได้เสียบอยู่ — ระบบบอกว่าไฟล์อยู่ไดรฟ์ลูกไหน โฟลเดอร์ไหน</p>
-    <img src="assets/howto-library.jpg" alt="คลังงาน — ค้นหาข้ามทุกไดรฟ์" loading="lazy">
+    <img src="assets/howto-library-v2.jpg" alt="คลังงาน — ค้นหาข้ามทุกไดรฟ์" loading="lazy">
   </div>
 
   <div class="step-card">
     <div class="step-num">5</div>
     <h3>หาไฟล์ซ้ำ คืนพื้นที่</h3>
     <p>แท็บไฟล์ซ้ำ เลือกขนาดขั้นต่ำแล้วกดค้นหา — ระบบเทียบชื่อและขนาดไฟล์ข้ามทุกไดรฟ์ แล้วบอกว่าคืนพื้นที่ได้เท่าไหร่ โหมดอ่านอย่างเดียว ไม่มีการลบไฟล์อัตโนมัติ คุณตัดสินใจเองทุกไฟล์</p>
-    <img src="assets/howto-dedup.jpg" alt="ผลการหาไฟล์ซ้ำ" loading="lazy">
+    <img src="assets/howto-dedup-v2.jpg" alt="ผลการหาไฟล์ซ้ำ" loading="lazy">
   </div>
 </div>
 
