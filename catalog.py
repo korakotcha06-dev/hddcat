@@ -681,18 +681,18 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
 
 ## วิธีเปิดใช้ (macOS)
 
-1. แตกไฟล์ zip นี้ไว้ที่ไหนก็ได้ (เช่น โฟลเดอร์ Applications หรือ Documents)
-2. **คลิกขวา** ที่ไฟล์ `เปิด HDDCAT.command` แล้วเลือก **Open** (ครั้งแรกครั้งเดียว —
-   macOS จะถามยืนยันเพราะไฟล์มาจากอินเทอร์เน็ต) ครั้งต่อไปดับเบิลคลิกได้เลย
-3. เบราว์เซอร์จะเปิด HDDCAT ขึ้นมาเอง → ไปที่แท็บ "สแกน" เสียบไดรฟ์ แล้วเริ่มเก็บ catalog ได้ทันที
+1. แตกไฟล์ zip แล้วลาก HDDCAT.app ไปไว้ที่ไหนก็ได้ (เช่น โฟลเดอร์ Applications)
+2. **คลิกขวา** ที่ HDDCAT.app แล้วเลือก **Open** (ครั้งแรกครั้งเดียว — macOS ถามยืนยัน
+   เพราะแอปมาจากอินเทอร์เน็ต) ครั้งต่อไปดับเบิลคลิกได้เลย
+3. เบราว์เซอร์จะเปิด HDDCAT ขึ้นมาเอง — จะปิดโปรแกรมเมื่อไหร่ คลิกขวาที่ไอคอนแมวใน Dock แล้วเลือก Quit
 
 > ครั้งแรก ถ้าเครื่องยังไม่มี python3 ระบบจะเด้งหน้าต่างชวนติดตั้ง
 > "Command Line Developer Tools" — กด Install รอสักครู่ แล้วเปิดใหม่อีกครั้ง
 
 ## ข้อมูลอยู่ที่ไหน?
 
-ทุกอย่างอยู่ในไฟล์ `catalog.db` ข้างๆ ตัวโปรแกรมนี้ — ไม่มีอะไรถูกส่งออกจากเครื่องคุณ
-อยากย้ายเครื่อง ก็ก๊อปทั้งโฟลเดอร์นี้ไปได้เลย
+ทุกอย่างอยู่ในโฟลเดอร์ ~/HDDCAT (ไฟล์ catalog.db) — ไม่มีอะไรถูกส่งออกจากเครื่องคุณ
+อยากย้ายเครื่องก็ก๊อปโฟลเดอร์นี้ไป
 
 ## ใช้จาก Terminal ก็ได้
 
@@ -728,12 +728,50 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-_DIST_LAUNCHER = '#!/bin/bash\ncd "$(dirname "$0")"\nexec python3 catalog.py serve\n'
+_DIST_INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>HDDCAT</string>
+    <key>CFBundleDisplayName</key>
+    <string>HDDCAT</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.tnmlab.hddcat</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleIconFile</key>
+    <string>HDDCAT</string>
+    <key>CFBundleExecutable</key>
+    <string>HDDCAT</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"""
+
+# HDDCAT.app/Contents/MacOS/HDDCAT - the app bundle's actual executable. Keeps
+# all user data under ~/HDDCAT (not wherever the .app happens to be dragged
+# to - Applications/ is typically not user-writable).
+_DIST_APP_LAUNCHER = (
+    '#!/bin/bash\n'
+    'BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"\n'
+    'mkdir -p "$HOME/HDDCAT"\n'
+    'cd "$HOME/HDDCAT"\n'
+    'exec /usr/bin/env python3 "$BUNDLE/Contents/Resources/catalog.py" serve\n'
+)
 
 
 def cmd_build_dist(args):
-    """Build dist/HDDCAT.zip - a self-contained HDDCAT/ folder (catalog.py + double
-    click launcher + README + LICENSE) ready to hand to anyone. Never bundles
+    """Build dist/HDDCAT.zip - a self-contained HDDCAT/ folder with a real,
+    double-clickable HDDCAT.app (cat icon, shows in the Dock) plus a plain
+    catalog.py copy for Terminal users, README and LICENSE. Never bundles
     catalog.db or assets/ - those are per-machine/private."""
     root = os.path.dirname(os.path.abspath(__file__))
     dist_dir = os.path.join(root, "dist")
@@ -741,16 +779,44 @@ def cmd_build_dist(args):
     zip_path = os.path.join(dist_dir, "HDDCAT.zip")
     now = time.localtime()[:6]
 
+    icns_path = os.path.join(root, "icon-work", "HDDCAT.icns")
+    if not os.path.isfile(icns_path):
+        print(f"ERROR: ไม่พบไฟล์ไอคอน {icns_path}")
+        print("สร้างก่อนด้วย qlmanage/iconutil (ดูขั้นตอนใน R11 ของแผน) แล้วค่อยรัน build-dist ใหม่")
+        sys.exit(1)
+    with open(icns_path, "rb") as f:
+        icns_bytes = f.read()
+
+    plist = _DIST_INFO_PLIST.format(version=__version__)
+
     entries = []
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        # plain copy at the top level, for Terminal/CLI users
         zf.write(os.path.abspath(__file__), "HDDCAT/catalog.py")
         entries.append("HDDCAT/catalog.py")
 
-        zi = zipfile.ZipInfo("HDDCAT/เปิด HDDCAT.command", date_time=now)
+        # HDDCAT.app/Contents/Info.plist
+        zi = zipfile.ZipInfo("HDDCAT/HDDCAT.app/Contents/Info.plist", date_time=now)
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(zi, plist)
+        entries.append("HDDCAT/HDDCAT.app/Contents/Info.plist")
+
+        # HDDCAT.app/Contents/MacOS/HDDCAT (the executable - exec bit set)
+        zi = zipfile.ZipInfo("HDDCAT/HDDCAT.app/Contents/MacOS/HDDCAT", date_time=now)
         zi.compress_type = zipfile.ZIP_DEFLATED
         zi.external_attr = 0o755 << 16
-        zf.writestr(zi, _DIST_LAUNCHER)
-        entries.append("HDDCAT/เปิด HDDCAT.command")
+        zf.writestr(zi, _DIST_APP_LAUNCHER)
+        entries.append("HDDCAT/HDDCAT.app/Contents/MacOS/HDDCAT")
+
+        # HDDCAT.app/Contents/Resources/HDDCAT.icns
+        zi = zipfile.ZipInfo("HDDCAT/HDDCAT.app/Contents/Resources/HDDCAT.icns", date_time=now)
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(zi, icns_bytes)
+        entries.append("HDDCAT/HDDCAT.app/Contents/Resources/HDDCAT.icns")
+
+        # HDDCAT.app/Contents/Resources/catalog.py (what the launcher actually runs)
+        zf.write(os.path.abspath(__file__), "HDDCAT/HDDCAT.app/Contents/Resources/catalog.py")
+        entries.append("HDDCAT/HDDCAT.app/Contents/Resources/catalog.py")
 
         zi = zipfile.ZipInfo("HDDCAT/README.md", date_time=now)
         zi.compress_type = zipfile.ZIP_DEFLATED

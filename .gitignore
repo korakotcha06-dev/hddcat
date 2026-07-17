@@ -7,3 +7,8 @@ catalog.py.orig-backup
 __pycache__/
 .DS_Store
 *.zip
+make_demo_db.py
+demo-catalog.db*
+icon-work/*
+!icon-work/icon.svg
+!icon-work/HDDCAT.icns
