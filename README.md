@@ -1,40 +1,67 @@
-# HDDCAT 🐈💾 — Every File You Own. One Search Away.
+# HDDCAT 🐈💾
 
-สแกนฮาร์ดดิสก์ทุกลูกของคุณเข้า catalog เดียว ค้นเจอทุกไฟล์ในเสี้ยววินาที
-โดยไม่ต้องเสียบไดรฟ์ — ข้อมูลทั้งหมดอยู่ในเครื่องคุณ 100% ไม่มี cloud
+**Every file you own. One search away.** — Catalog every external drive you have into one searchable index. Find any file in under a second, without plugging a single drive in.
 
-## Screenshot
+[Website](https://hddcat.tnmlab.dev) · [How to use (ไทย)](https://hddcat.tnmlab.dev/how-to.html) · MIT License · macOS
 
-_(coming soon)_
+![HDDCAT library view](site/assets/howto-library-v2.jpg)
 
-## วิธีเปิดใช้ (macOS)
+## Why
 
-1. แตกไฟล์ zip นี้ไว้ที่ไหนก็ได้ (เช่น โฟลเดอร์ Applications หรือ Documents)
-2. **คลิกขวา** ที่ไฟล์ `เปิด HDDCAT.command` แล้วเลือก **Open** (ครั้งแรกครั้งเดียว —
-   macOS จะถามยืนยันเพราะไฟล์มาจากอินเทอร์เน็ต) ครั้งต่อไปดับเบิลคลิกได้เลย
+Photographers and video editors end up with a mountain of external HDDs — and no idea which drive holds which file. HDDCAT scans each drive once into a local SQLite catalog, then answers instantly: which drive, which folder. It also groups a decade of client work by name/date (understands both CE and Thai Buddhist-era dates) and finds duplicate files across drives.
 
-   > ถ้าใช้ macOS 15 (Sequoia) ขึ้นไปแล้วคลิกขวาไม่มีผล: เปิด System Settings > Privacy & Security
-   > เลื่อนลงล่างสุด จะเห็นข้อความว่า HDDCAT ถูกบล็อก ให้กด "Open Anyway" แล้วยืนยันอีกครั้ง —
-   > ทำครั้งแรกครั้งเดียวเช่นกัน
+## Features
 
-3. เบราว์เซอร์จะเปิด HDDCAT ขึ้นมาเอง → ไปที่แท็บ "สแกน" เสียบไดรฟ์ แล้วเริ่มเก็บ catalog ได้ทันที
+- Scan any mounted drive into a local catalog (100k files ≈ seconds)
+- Search everything while drives sit on a shelf
+- Smart library: auto-groups client / job / date (CE + BE calendars)
+- Cross-drive duplicate finder (name+size, read-only)
+- Plug-in detection: pops "scan now?" when a drive mounts
+- Self-updating .app, local web UI, zero telemetry (one version-check ping, can be disabled)
 
-> ครั้งแรก ถ้าเครื่องยังไม่มี python3 ระบบจะเด้งหน้าต่างชวนติดตั้ง
-> "Command Line Developer Tools" — กด Install รอสักครู่ แล้วเปิดใหม่อีกครั้ง
+## The whole app is ONE file
 
-## ข้อมูลอยู่ที่ไหน?
+`catalog.py` — Python stdlib only. No pip installs, no node_modules, no build step. The web UI is vanilla HTML/CSS/JS embedded in the same file. This is a feature, not an accident (see Contributing).
 
-ทุกอย่างอยู่ในไฟล์ `catalog.db` ข้างๆ ตัวโปรแกรมนี้ — ไม่มีอะไรถูกส่งออกจากเครื่องคุณ
-อยากย้ายเครื่อง ก็ก๊อปทั้งโฟลเดอร์นี้ไปได้เลย
+## Run from source
 
-แอปเช็คเวอร์ชันใหม่จาก hddcat.tnmlab.dev วันละครั้ง (ส่งแค่หมายเลขเวอร์ชัน ปิดได้ในแถบแจ้งเตือน)
+```
+git clone https://github.com/korakotcha06-dev/hddcat.git
+cd hddcat
+python3 catalog.py serve
+```
 
-## ใช้จาก Terminal ก็ได้
+(macOS ships python3 with the Command Line Tools. Data lives in `catalog.db` next to where you run it — use `--db path` to point elsewhere.)
 
-    python3 catalog.py scan /Volumes/ไดรฟ์ของคุณ --label ชื่อไดรฟ์
-    python3 catalog.py search คำค้น
-    python3 catalog.py serve
+## CLI
+
+| command | does |
+|---|---|
+| `scan /Volumes/X --label X` | index a drive |
+| `search <keyword>` | find files across all drives |
+| `report` | per-drive summary |
+| `dedup` | duplicate candidates across drives |
+| `groups --by-client` | cluster jobs by client name |
+| `export-folders-csv out.csv --smart-depth` | folder rollup for Excel |
+| `export-obsidian <vault>` | one Markdown note per drive |
+| `forget <label> --yes` | remove a drive from the catalog |
+| `serve` | local web UI |
+| `build-dist` | build the distributable zip (.app) |
+
+## Contributing
+
+PRs and forks welcome — especially:
+
+- **Windows / Linux port** (drive detection + paths are the main work)
+- Content-hash dedup (opt-in, for mounted drives)
+- UI translations (EN)
+- Homebrew tap
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first — the zero-dependency rule is load-bearing.
+
+## เวอร์ชันภาษาไทย
+
+ดาวน์โหลดตัวใช้งาน + วิธีใช้ทั้งหมดที่ [hddcat.tnmlab.dev](https://hddcat.tnmlab.dev)
 
 ---
-MIT License · © 2026 [Touchnewmedia Co., Ltd.](https://www.thetnm.com)
-GitHub: https://github.com/korakotcha06-dev/hddcat · ☕ https://www.buymeacoffee.com/korakot
+Made with a sleeping cat by [Touchnewmedia Co., Ltd.](https://www.thetnm.com) · [Buy me a coffee](https://www.buymeacoffee.com/korakot)
