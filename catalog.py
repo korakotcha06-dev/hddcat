@@ -31,7 +31,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 import argparse
 import json
@@ -1382,11 +1382,6 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
 .hero-desc { max-width: 760px; color: var(--color-body-1); font-size: 16px;
   line-height: 1.75; margin-bottom: 32px; }
 .hero-cta { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
-  margin-bottom: 0; }
-.dl-free { padding: 17px 34px; font-size: 17px; gap: 12px;
-  box-shadow: 0 8px 24px rgba(102, 51, 238, 0.30); }
-.dl-free svg { flex: none; }
-.hero-cta-sub { font-size: 12.5px; color: var(--counter-title); margin-top: 10px;
   margin-bottom: 46px; }
 .hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 18px; max-width: 960px; width: 100%; }
@@ -1522,6 +1517,16 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
 .update-banner .ub-actions .btn { padding: 7px 16px; font-size: 13px; }
 .update-banner .ub-skip { font-size: 12.5px; color: var(--counter-title);
   text-decoration: underline; cursor: pointer; white-space: nowrap; }
+
+/* ---- version chip (persistent, all tabs) ---- */
+#version-chip { position: fixed; bottom: 14px; right: 16px; z-index: 40;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: inherit; font-size: 11.5px; color: var(--counter-title);
+  background: rgba(255,255,255,.8); border: 1px solid var(--color-border);
+  border-radius: 20px; padding: 6px 12px; cursor: pointer;
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+#version-chip:hover { border-color: var(--color-primary); color: var(--color-primary); }
+#version-chip.vc-available { color: var(--color-primary); border-color: var(--color-primary); }
 </style>
 <link rel="stylesheet" href="/theme.css">
 </head>
@@ -1561,6 +1566,7 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
   </span>
 </div>
 <div id="drive-toasts"></div>
+<button id="version-chip" title="กดเพื่อเช็คอัปเดต">HDDCAT v{{VERSION}} · เช็คอัปเดต</button>
 
 <main>
 
@@ -1574,11 +1580,9 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
     <p class="hero-tagline">พลังของคลังไฟล์นับล้าน — รวมทุกไดรฟ์ ค้นครั้งเดียว เจอทันที</p>
     <p class="hero-desc">Scan millions of files in seconds. Organize a decade of client work automatically. Find anything — even on drives sitting on a shelf.<br>สแกนไฟล์เป็นล้านในไม่กี่วินาที จัดเรียงงานทั้งทศวรรษตามลูกค้าและวันที่ แล้วค้นเจอทุกไฟล์ แม้ไดรฟ์จะไม่ได้เสียบอยู่</p>
     <div class="hero-cta">
-      <a class="btn dl-free" id="hero-dl" href="/download/HDDCAT.zip"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
       <button class="btn" id="hero-cta-library">เปิดคลังงาน →</button>
       <button class="btn btn-border" id="hero-cta-scan">สแกนไดรฟ์</button>
     </div>
-    <div class="hero-cta-sub"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;margin-right:3px"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.03 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>macOS · ฟรี · open-source</div>
     <div class="hero-stats">
       <div class="hero-stat">
         <div class="hero-stat-num" id="hero-stat-files">0</div>
@@ -1731,6 +1735,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const NO_CLIENT = "(no client)";
+const HDDCAT_VERSION = "{{VERSION}}";
 const api = async (path, opts) => {
   const r = await fetch(path, opts);
   return r.json();
@@ -2159,6 +2164,40 @@ async function pollUpdateJob() {
   }
 }
 
+/* ---------- version chip (manual check) ---------- */
+const VC_LABEL = `HDDCAT v${HDDCAT_VERSION} · เช็คอัปเดต`;
+function vcReset() {
+  const chip = $("version-chip");
+  chip.classList.remove("vc-available");
+  chip.innerHTML = VC_LABEL;
+}
+$("version-chip").addEventListener("click", async () => {
+  const chip = $("version-chip");
+  if (chip.disabled) return;
+  chip.disabled = true;
+  chip.classList.remove("vc-available");
+  chip.innerHTML = `${CAT_SM}กำลังเช็ค...`;
+  try {
+    const res = await api("/api/update?force=1");
+    if (!res.ok) throw new Error("check failed");
+    if (res.available) {
+      chip.classList.add("vc-available");
+      chip.innerHTML = `มีเวอร์ชันใหม่ v${esc(res.latest)} ↑`;
+      $("update-banner").hidden = false;
+      $("ub-text").innerHTML = `🐈 มีเวอร์ชันใหม่ v${esc(res.latest)} — ${esc(res.notes || "")}`;
+      sessionStorage.removeItem("hddcat-update-dismissed");
+    } else {
+      chip.innerHTML = `✓ ล่าสุดแล้ว (v${esc(res.current)})`;
+      setTimeout(vcReset, 2500);
+    }
+  } catch (e) {
+    chip.innerHTML = "เช็คไม่ได้ (ออฟไลน์?)";
+    setTimeout(vcReset, 2500);
+  } finally {
+    chip.disabled = false;
+  }
+});
+
 /* ---------- init ---------- */
 (async () => {
   loadDrives();
@@ -2210,7 +2249,8 @@ def cmd_serve(args):
                 q = parse_qs(u.query)
                 route = u.path
                 if route == "/":
-                    self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+                    html = INDEX_HTML.replace("{{VERSION}}", __version__)
+                    self._send(200, html, "text/html; charset=utf-8")
                 elif route == "/theme.css":
                     # optional override file next to catalog.py (Touch's custom CSS)
                     theme = os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme.css")
@@ -2262,7 +2302,8 @@ def cmd_serve(args):
                 elif route == "/api/jobs":
                     self._json({"ok": True, "jobs": _jobs_snapshot()})
                 elif route == "/api/update":
-                    st = check_update()
+                    force = q.get("force", ["0"])[0] in ("1", "true", "yes")
+                    st = check_update(force=force)
                     latest = st.get("latest")
                     available = bool(latest) and _is_newer(latest, __version__)
                     self._json({"ok": True, "current": __version__, "latest": latest,
