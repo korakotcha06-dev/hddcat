@@ -9,6 +9,7 @@ __pycache__/
 *.zip
 make_demo_db.py
 demo-catalog.db*
+update_check.json
 icon-work/*
 !icon-work/icon.svg
 !icon-work/HDDCAT.icns

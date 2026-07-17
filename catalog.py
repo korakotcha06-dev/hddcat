@@ -31,7 +31,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
 import json
@@ -45,6 +45,8 @@ import time
 import difflib
 import webbrowser
 import zipfile
+import tempfile
+import urllib.request
 from collections import defaultdict
 
 DB_DEFAULT = "catalog.db"
@@ -699,6 +701,8 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
 ทุกอย่างอยู่ในโฟลเดอร์ ~/HDDCAT (ไฟล์ catalog.db) — ไม่มีอะไรถูกส่งออกจากเครื่องคุณ
 อยากย้ายเครื่องก็ก๊อปโฟลเดอร์นี้ไป
 
+แอปเช็คเวอร์ชันใหม่จาก hddcat.tnmlab.dev วันละครั้ง (ส่งแค่หมายเลขเวอร์ชัน ปิดได้ในแถบแจ้งเตือน)
+
 ## ใช้จาก Terminal ก็ได้
 
     python3 catalog.py scan /Volumes/ไดรฟ์ของคุณ --label ชื่อไดรฟ์
@@ -917,7 +921,7 @@ def cmd_export_obsidian(args):
 # ---------------------------------------------------------------------------
 
 _JOBS_LOCK = threading.Lock()
-_JOBS = {"scan": {"status": "idle"}, "dedup": {"status": "idle"}}
+_JOBS = {"scan": {"status": "idle"}, "dedup": {"status": "idle"}, "update": {"status": "idle"}}
 
 
 def _jobs_snapshot():
@@ -974,6 +978,175 @@ def _start_dedup_job(db_path, min_size):
         except Exception as e:
             with _JOBS_LOCK:
                 _JOBS["dedup"] = {"status": "error", "error": str(e)}
+
+    threading.Thread(target=run, daemon=True).start()
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# update check + self-update (.app only) - server-side, stdlib only.
+# Settings live in update_check.json next to catalog.db (CWD) so the CLI and
+# the .app (which cd's into ~/HDDCAT) both get one shared, user-visible file.
+# ---------------------------------------------------------------------------
+
+_UPDATE_URL = "https://hddcat.tnmlab.dev/version.json"
+_UPDATE_SETTINGS_FILE = "update_check.json"
+_update_state = {"checked_at": 0, "latest": None, "url": None, "notes": ""}
+
+
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split("."))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def _is_newer(latest, current):
+    return _version_tuple(latest) > _version_tuple(current)
+
+
+def _load_update_settings():
+    path = os.path.join(os.getcwd(), _UPDATE_SETTINGS_FILE)
+    if not os.path.isfile(path):
+        settings = {"enabled": True}
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        return settings
+    try:
+        with open(path, encoding="utf-8") as f:
+            settings = json.load(f)
+        if not isinstance(settings, dict) or "enabled" not in settings:
+            return {"enabled": True}
+        return settings
+    except (OSError, ValueError):
+        return {"enabled": True}
+
+
+def _save_update_settings(settings):
+    path = os.path.join(os.getcwd(), _UPDATE_SETTINGS_FILE)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def check_update(force=False):
+    """Check hddcat.tnmlab.dev/version.json for a newer release. Never raises -
+    on any failure the previous cached state is left untouched. Respects the
+    update_check.json 'enabled' toggle unless force=True."""
+    settings = _load_update_settings()
+    enabled = bool(settings.get("enabled", True))
+    if not enabled and not force:
+        st = dict(_update_state)
+        st["enabled"] = enabled
+        return st
+    now = time.time()
+    if not force and (now - _update_state["checked_at"] < 21600):
+        st = dict(_update_state)
+        st["enabled"] = enabled
+        return st
+    try:
+        req = urllib.request.Request(_UPDATE_URL,
+                                      headers={"User-Agent": f"HDDCAT/{__version__}"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = str(data.get("version") or "").strip()
+        if latest:
+            _update_state["checked_at"] = now
+            _update_state["latest"] = latest
+            _update_state["url"] = data.get("url")
+            _update_state["notes"] = data.get("notes") or ""
+    except Exception:
+        pass  # offline / DNS / timeout / bad json - keep old state, never raise
+    st = dict(_update_state)
+    st["enabled"] = enabled
+    return st
+
+
+def _start_update_job():
+    this_file = os.path.abspath(__file__)
+    if "/Contents/Resources/" not in this_file:
+        return False, ("อัปเดตอัตโนมัติได้เฉพาะเวอร์ชัน .app "
+                        "(สาย CLI ใช้ git pull/โหลด zip เอง)")
+    with _JOBS_LOCK:
+        if _JOBS.get("update", {}).get("status") == "running":
+            return False, "กำลังอัปเดตอยู่ - รอให้เสร็จก่อน"
+        _JOBS["update"] = {"status": "running", "started": time.time()}
+
+    def run():
+        old_backup = None
+        bundle_root = None
+        tmp_zip = None
+        tmp_extract = None
+        try:
+            st = check_update(force=True)
+            latest = st.get("latest")
+            url = st.get("url")
+            if not latest or not url or not _is_newer(latest, __version__):
+                raise RuntimeError("ไม่มีเวอร์ชันใหม่ให้อัปเดต")
+
+            resources_dir = os.path.dirname(this_file)     # .../Contents/Resources
+            contents_dir = os.path.dirname(resources_dir)  # .../Contents
+            bundle_root = os.path.dirname(contents_dir)    # .../HDDCAT.app
+
+            fd, tmp_zip = tempfile.mkstemp(suffix=".zip", prefix="hddcat-update-")
+            os.close(fd)
+            req = urllib.request.Request(url, headers={"User-Agent": f"HDDCAT/{__version__}"})
+            with urllib.request.urlopen(req, timeout=30) as resp, open(tmp_zip, "wb") as out:
+                shutil.copyfileobj(resp, out)
+
+            tmp_extract = tempfile.mkdtemp(prefix="hddcat-update-")
+            with zipfile.ZipFile(tmp_zip) as zf:
+                zf.extractall(tmp_extract)
+
+            new_app_path = os.path.join(tmp_extract, "HDDCAT", "HDDCAT.app")
+            new_catalog = os.path.join(new_app_path, "Contents", "Resources", "catalog.py")
+            if not os.path.isfile(new_catalog):
+                raise RuntimeError("ไฟล์ zip ใหม่ไม่มี HDDCAT.app ที่ถูกต้อง")
+
+            ts = time.strftime("%Y%m%d%H%M%S")
+            old_backup = bundle_root + ".old-" + ts
+            shutil.move(bundle_root, old_backup)
+            try:
+                shutil.move(new_app_path, bundle_root)
+            except Exception:
+                if os.path.isdir(old_backup) and not os.path.isdir(bundle_root):
+                    shutil.move(old_backup, bundle_root)
+                    old_backup = None
+                raise
+
+            try:
+                shutil.rmtree(old_backup)  # best-effort - keep the backup if this fails
+            except Exception:
+                pass
+
+            with _JOBS_LOCK:
+                _JOBS["update"] = {"status": "done", "version": latest,
+                                    "message": f"อัปเดตเป็น v{latest} แล้ว"}
+        except Exception as e:
+            try:
+                if old_backup and os.path.isdir(old_backup) and bundle_root \
+                        and not os.path.isdir(bundle_root):
+                    shutil.move(old_backup, bundle_root)
+            except Exception:
+                pass
+            with _JOBS_LOCK:
+                _JOBS["update"] = {"status": "error", "error": str(e)}
+        finally:
+            try:
+                if tmp_zip and os.path.isfile(tmp_zip):
+                    os.remove(tmp_zip)
+            except Exception:
+                pass
+            try:
+                if tmp_extract and os.path.isdir(tmp_extract):
+                    shutil.rmtree(tmp_extract)
+            except Exception:
+                pass
 
     threading.Thread(target=run, daemon=True).start()
     return True, None
@@ -1314,6 +1487,17 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
 #file-hits { margin-top: 22px; }
 #file-hits .dedup-head { margin-top: 0; }
 .readonly-note { font-size: 12.5px; color: var(--counter-title); margin-top: 14px; }
+
+/* ---- update banner (docked under the topbar) ---- */
+.update-banner { display: flex; align-items: center; gap: 14px; padding: 10px 24px;
+  background: rgba(102, 51, 238, 0.08); border-bottom: 1px solid rgba(102, 51, 238, 0.18); }
+.update-banner[hidden] { display: none; }
+.update-banner .ub-icon { font-size: 18px; }
+.update-banner .ub-text { flex: 1; font-size: 13.5px; color: var(--color-heading-1); }
+.update-banner .ub-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.update-banner .ub-actions .btn { padding: 7px 16px; font-size: 13px; }
+.update-banner .ub-skip { font-size: 12.5px; color: var(--counter-title);
+  text-decoration: underline; cursor: pointer; white-space: nowrap; }
 </style>
 <link rel="stylesheet" href="/theme.css">
 </head>
@@ -1343,6 +1527,15 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
     </div>
   </div>
 </header>
+<div id="update-banner" class="update-banner" hidden>
+  <span class="ub-icon" aria-hidden="true">🐈</span>
+  <span class="ub-text" id="ub-text"></span>
+  <span class="ub-actions" id="ub-actions">
+    <button class="btn" id="ub-apply">อัปเดตเลย</button>
+    <button class="btn btn-border" id="ub-dismiss">ปิด</button>
+    <a href="#" class="ub-skip" id="ub-skip">ไม่ต้องเช็คอีก</a>
+  </span>
+</div>
 <div id="drive-toasts"></div>
 
 <main>
@@ -1884,12 +2077,69 @@ function removeDriveToast(p) {
   if (el) el.remove();
 }
 
+/* ---------- update check + self-update ---------- */
+async function checkUpdate() {
+  try {
+    const res = await api("/api/update");
+    if (!res.ok) return;
+    if (res.available && res.enabled && sessionStorage.getItem("hddcat-update-dismissed") !== "1") {
+      $("update-banner").hidden = false;
+      $("ub-text").innerHTML = `🐈 มีเวอร์ชันใหม่ v${esc(res.latest)} — ${esc(res.notes || "")}`;
+    }
+  } catch (e) { /* offline - fail silently, try again next launch */ }
+}
+
+$("ub-dismiss").addEventListener("click", () => {
+  $("update-banner").hidden = true;
+  sessionStorage.setItem("hddcat-update-dismissed", "1");
+});
+
+$("ub-skip").addEventListener("click", async (e) => {
+  e.preventDefault();
+  await api("/api/update", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({action: "disable"})});
+  $("update-banner").hidden = true;
+});
+
+$("ub-apply").addEventListener("click", async () => {
+  $("ub-apply").disabled = true;
+  $("ub-text").innerHTML = `${CAT_SM}กำลังดาวน์โหลดและติดตั้งอัปเดต...`;
+  const res = await api("/api/update", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({action: "apply"})});
+  if (!res.ok) {
+    $("ub-text").textContent = "ผิดพลาด: " + res.error;
+    $("ub-apply").disabled = false;
+    return;
+  }
+  pollUpdateJob();
+});
+
+let updatePollT = null;
+async function pollUpdateJob() {
+  clearTimeout(updatePollT);
+  const res = await api("/api/jobs");
+  if (!res.ok) return;
+  const u = res.jobs.update || {};
+  if (u.status === "running") {
+    updatePollT = setTimeout(pollUpdateJob, 1500);
+  } else if (u.status === "done") {
+    $("update-banner").hidden = false;
+    $("ub-text").innerHTML =
+      `✅ อัปเดตเป็น v${esc(u.version)} แล้ว — ปิดแอป (คลิกขวาไอคอนแมวใน Dock &gt; Quit) แล้วเปิดใหม่`;
+    $("ub-actions").style.display = "none";
+  } else if (u.status === "error") {
+    $("ub-text").textContent = "อัปเดตไม่สำเร็จ: " + u.error;
+    $("ub-apply").disabled = false;
+  }
+}
+
 /* ---------- init ---------- */
 (async () => {
   loadDrives();
   loadFolders();
   pollJobs();
   pollVolumes();
+  checkUpdate();
   const h = location.hash.slice(1);
   if (h && document.querySelector('.tab-btn[data-tab="' + h + '"]')) gotoTab(h);
   if (location.hash === "#demo-toast") {
@@ -1985,6 +2235,13 @@ def cmd_serve(args):
                     self._json({"ok": True, "rows": rows, "truncated": len(rows) >= 1000})
                 elif route == "/api/jobs":
                     self._json({"ok": True, "jobs": _jobs_snapshot()})
+                elif route == "/api/update":
+                    st = check_update()
+                    latest = st.get("latest")
+                    available = bool(latest) and _is_newer(latest, __version__)
+                    self._json({"ok": True, "current": __version__, "latest": latest,
+                                "url": st.get("url"), "notes": st.get("notes") or "",
+                                "available": available, "enabled": st.get("enabled", True)})
                 elif route == "/api/volumes":
                     vols = []
                     try:
@@ -2062,6 +2319,23 @@ def cmd_serve(args):
                         min_size = 1048576
                     ok, err = _start_dedup_job(db_path, min_size)
                     self._json({"ok": ok, "error": err}, 200 if ok else 409)
+                elif self.path == "/api/update":
+                    action = (body.get("action") or "").strip()
+                    if action == "disable":
+                        s = _load_update_settings()
+                        s["enabled"] = False
+                        _save_update_settings(s)
+                        self._json({"ok": True, "enabled": False})
+                    elif action == "enable":
+                        s = _load_update_settings()
+                        s["enabled"] = True
+                        _save_update_settings(s)
+                        self._json({"ok": True, "enabled": True})
+                    elif action == "apply":
+                        ok, err = _start_update_job()
+                        self._json({"ok": ok, "error": err}, 200 if ok else 409)
+                    else:
+                        self._json({"ok": False, "error": "unknown action"}, 400)
                 elif self.path == "/api/forget":
                     label = (body.get("label") or "").strip()
                     if not label:
