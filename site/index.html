@@ -140,9 +140,12 @@ h1,h2,h3,h4 { font-family: var(--font-primary); color: var(--color-heading-1); }
   font-size: 13px; color: var(--color-title); line-height: 1.5; }
 .hero-stat-label .hero-stat-th { display: block;
   font-weight: var(--p-regular); font-size: 12px; color: var(--counter-title); }
-.hero-visual { width: 92%; max-width: 1180px; margin: 56px auto 0; }
+.hero-visual { width: 92%; max-width: 1180px; margin: 56px auto 0; position: relative; }
 .hero-visual img { width: 100%; display: block; border-radius: var(--radius-card);
   border: 1px solid var(--color-border); box-shadow: 0 30px 80px rgba(5, 1, 28, 0.18); }
+#cat-lottie { position: absolute; top: -148px; right: 48px; width: 180px; height: 180px;
+  pointer-events: none; z-index: 2; }
+@media (max-width: 760px) { #cat-lottie { width: 120px; height: 120px; top: -99px; right: 16px; } }
 .hero-strip { position: relative; width: 92%; max-width: 1180px; margin: 72px auto 0;
   border-radius: var(--radius-card); overflow: hidden; box-shadow: var(--shadow-card); }
 .hero-strip img { width: 100%; display: block; }
@@ -257,7 +260,7 @@ body { overflow-x: hidden; }
     <p class="hero-desc">Scan millions of files in seconds. Organize a decade of client work automatically. Find anything — even on drives sitting on a shelf.<br>สแกนไฟล์เป็นล้านในไม่กี่วินาที จัดเรียงงานทั้งทศวรรษตามลูกค้าและวันที่ แล้วค้นเจอทุกไฟล์ แม้ไดรฟ์จะไม่ได้เสียบอยู่</p>
     <div class="hero-cta">
       <a class="btn dl-free" id="hero-dl" href="HDDCAT.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
-      <a class="btn btn-border" href="#features">ดูฟีเจอร์ ↓</a>
+      <a class="btn btn-border" href="how-to.html">วิธีใช้</a>
     </div>
     <div class="hero-cta-sub"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;margin-right:3px"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.03 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>macOS · ฟรี · open-source</div>
     <div class="hero-stats">
@@ -278,7 +281,7 @@ body { overflow-x: hidden; }
         <div class="hero-stat-label">To Find Anything<span class="hero-stat-th">ค้นเจอทุกไฟล์</span></div>
       </div>
     </div>
-    <div class="hero-visual"><img src="assets/hero.jpg" alt="กองฮาร์ดดิสก์ยุ่งเหยิง — ลูกเดียวที่เรืองแสงคือลูกที่มีไฟล์ที่คุณตามหา" loading="lazy"></div>
+    <div class="hero-visual"><img src="assets/hero.jpg" alt="กองฮาร์ดดิสก์ยุ่งเหยิง — ลูกเดียวที่เรืองแสงคือลูกที่มีไฟล์ที่คุณตามหา" loading="lazy"><div id="cat-lottie" aria-hidden="true"></div></div>
   </div>
 </section>
 
@@ -381,6 +384,15 @@ body { overflow-x: hidden; }
   }
   requestAnimationFrame(frame);
 })();
+</script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+  var el = document.getElementById("cat-lottie");
+  if (el && window.lottie) {
+    lottie.loadAnimation({ container: el, renderer: "svg", loop: true, autoplay: true, path: "assets/cat-sleep.json" });
+  }
+});
 </script>
 </body>
 </html>
