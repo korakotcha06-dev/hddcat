@@ -1521,6 +1521,7 @@ document.querySelectorAll(".tab-btn").forEach(b => b.addEventListener("click", (
   document.querySelectorAll(".tab-btn").forEach(x => x.classList.toggle("active", x === b));
   document.querySelectorAll("section.view").forEach(v =>
     v.classList.toggle("active", v.id === "view-" + b.dataset.tab));
+  history.replaceState(null, "", "#" + b.dataset.tab);
 }));
 function gotoTab(name) { document.querySelector(`.tab-btn[data-tab=${name}]`).click(); }
 
@@ -1815,6 +1816,8 @@ async function pollJobs() {
   } else if ($("dedup-btn").disabled && (d.status === "done" || d.status === "error")) {
     $("dedup-btn").disabled = false;
     renderDedup(d);
+  } else if (d.status === "done" && $("dedup-results").innerHTML === "") {
+    renderDedup(d);
   }
   if (s.status === "running" || d.status === "running") pollT = setTimeout(pollJobs, 1000);
 }
@@ -1882,6 +1885,13 @@ function removeDriveToast(p) {
   loadFolders();
   pollJobs();
   pollVolumes();
+  const h = location.hash.slice(1);
+  if (h && document.querySelector('.tab-btn[data-tab="' + h + '"]')) gotoTab(h);
+  if (location.hash === "#demo-toast") {
+    gotoTab("scan");
+    /* demo hook: deterministic toast for docs/screenshots */
+    showDriveToast({ path: "/Volumes/WD-4TB-01", name: "WD-4TB-01", known_label: "WD-4TB-01", last_scanned: 1784130000 });
+  }
 })();
 </script>
 </body>
