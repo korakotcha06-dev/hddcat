@@ -29,5 +29,5 @@ _(coming soon)_
     python3 catalog.py serve
 
 ---
-MIT License · © 2026 Touchnewmedia Co., Ltd.
+MIT License · © 2026 [Touchnewmedia Co., Ltd.](https://www.thetnm.com)
 GitHub: https://github.com/korakotcha06-dev/hddcat · ☕ https://www.buymeacoffee.com/korakot

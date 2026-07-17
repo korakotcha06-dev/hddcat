@@ -701,7 +701,7 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
     python3 catalog.py serve
 
 ---
-MIT License · © 2026 Touchnewmedia Co., Ltd.
+MIT License · © 2026 [Touchnewmedia Co., Ltd.](https://www.thetnm.com)
 GitHub: https://github.com/korakotcha06-dev/hddcat · ☕ https://www.buymeacoffee.com/korakot
 """
 
@@ -1238,6 +1238,8 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
 .founder-name { font-family: var(--font-primary); font-weight: var(--p-bold);
   font-size: 16px; color: var(--color-primary); }
 .founder-title { font-size: 13px; color: var(--counter-title); }
+.founder-title a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
+.founder-title a:hover { color: var(--color-primary); }
 @media (max-width: 700px) { .founder { flex-direction: column; text-align: center; } }
 
 /* ---- panels (scan / dedup) ---- */
@@ -1415,7 +1417,7 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
       <div class="founder-text">
         <p class="founder-quote">“ผมสร้าง HDD Catalog เพราะเจอปัญหานี้เองทุกวัน — งานสิบปีกระจายอยู่บนไดรฟ์นับสิบลูก ตอนนี้ทุกไฟล์ตอบได้ในการค้นครั้งเดียว”</p>
         <p class="founder-name">Korakot Changpan</p>
-        <p class="founder-title">CEO of Touchnewmedia</p>
+        <p class="founder-title">CEO of <a href="https://www.thetnm.com" target="_blank" rel="noopener">Touchnewmedia</a></p>
       </div>
     </div>
     <div class="hero-social">
