@@ -187,6 +187,21 @@ h1,h2,h3,h4 { font-family: var(--font-primary); color: var(--color-heading-1); }
 .faq-item h3 { font-size: 18px; color: var(--color-heading-1); margin-bottom: 8px; }
 .faq-item p { font-size: 14.5px; color: var(--color-body-1); line-height: 1.75; }
 
+/* ---- sponsors ---- */
+.sponsors-sec { max-width: 860px; margin: 88px auto 0; padding: 0 24px; text-align: center; }
+.sponsors-sec h2 { text-align: center; font-family: var(--font-primary);
+  font-size: clamp(28px, 3.6vw, 44px); margin-bottom: 8px; }
+.sponsors-sub { font-size: 15px; color: var(--counter-title); }
+#sponsors-wall { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start;
+  gap: 24px; margin: 28px 0; }
+.sponsor-item { display: flex; flex-direction: column; align-items: center; gap: 8px;
+  text-decoration: none; width: 90px; }
+.sponsor-item img { width: 72px; height: 72px; object-fit: cover; border-radius: 50%;
+  border: 2px solid var(--color-primary); }
+.sponsor-item span { font-size: 13px; color: var(--color-title); overflow-wrap: anywhere; }
+.sponsors-empty { font-size: 14.5px; color: var(--counter-title); }
+.sponsors-note { font-size: 12.5px; color: var(--counter-title); margin-top: 14px; }
+
 /* ---- GitHub / BMC row ---- */
 .hero-social { display: flex; gap: 12px; justify-content: center; align-items: center;
   flex-wrap: wrap; margin: 56px 0 0; }
@@ -350,6 +365,14 @@ body { overflow-x: hidden; }
   </div>
 </div>
 
+<section class="sponsors-sec" id="sponsors">
+  <h2>ผู้สนับสนุน</h2>
+  <p class="sponsors-sub">คนที่เลี้ยงกาแฟให้แมวตัวนี้ตื่นมาทำงานต่อ ☕</p>
+  <div id="sponsors-wall"></div>
+  <a class="bmc-y" href="https://www.buymeacoffee.com/korakot" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+  <p class="sponsors-note">เลี้ยงกาแฟแล้วอยากให้ชื่อ+รูปขึ้นตรงนี้ บอกไว้ในข้อความตอนสนับสนุนได้เลย</p>
+</section>
+
 <footer>
   <div class="hero-social">
     <a class="navlink" href="how-to.html">วิธีใช้</a>
@@ -383,6 +406,27 @@ body { overflow-x: hidden; }
     if (e < 1) requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+})();
+</script>
+<script>
+(function () {
+  const wall = document.getElementById("sponsors-wall");
+  if (!wall) return;
+  const esc = s => String(s ?? "").replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const renderEmpty = () => {
+    wall.innerHTML = '<p class="sponsors-empty">ยังไม่มีใครเลย — เป็นคนแรกสิ 🐈</p>';
+  };
+  fetch("sponsors.json").then(r => r.json()).then(data => {
+    const sponsors = (data && data.sponsors) || [];
+    if (!sponsors.length) { renderEmpty(); return; }
+    wall.innerHTML = sponsors.map(s => {
+      const inner = `<img src="${esc(s.img)}" alt="${esc(s.name)}" loading="lazy"><span>${esc(s.name)}</span>`;
+      return s.url
+        ? `<a class="sponsor-item" href="${esc(s.url)}" target="_blank" rel="noopener">${inner}</a>`
+        : `<div class="sponsor-item">${inner}</div>`;
+    }).join("");
+  }).catch(renderEmpty);
 })();
 </script>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>

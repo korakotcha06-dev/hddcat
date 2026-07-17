@@ -59,6 +59,14 @@ PRs and forks welcome — especially:
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) first — the zero-dependency rule is load-bearing.
 
+## Supporters ☕
+
+People who keep the cat awake. [Buy me a coffee](https://www.buymeacoffee.com/korakot) and your name + avatar goes up on the [website](https://hddcat.tnmlab.dev/#sponsors) and here.
+
+*No supporters yet — be the first!*
+
+(When sponsors exist later, this section gets avatar images — manual per-sponsor updates.)
+
 ## เวอร์ชันภาษาไทย
 
 ดาวน์โหลดตัวใช้งาน + วิธีใช้ทั้งหมดที่ [hddcat.tnmlab.dev](https://hddcat.tnmlab.dev)

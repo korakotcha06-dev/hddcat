@@ -1,0 +1,4 @@
+{
+  "_schema": "sponsors: array of {\"name\": \"...\", \"img\": \"assets/sponsors/<file>.jpg\", \"url\": \"https://...\" (optional)}",
+  "sponsors": []
+}
