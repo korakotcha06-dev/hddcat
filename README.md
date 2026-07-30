@@ -16,6 +16,7 @@ Photographers and video editors end up with a mountain of external HDDs — and 
 - Search everything while drives sit on a shelf
 - Smart library: auto-groups client / job / date (CE + BE calendars)
 - Cross-drive duplicate finder (name+size, read-only)
+- Reclaim space: editor cache/junk detection, big-and-untouched files, where the space went — exports a checklist, never deletes
 - Plug-in detection: pops "scan now?" when a drive mounts
 - Self-updating .app, native window, zero telemetry (one version-check ping, can be disabled)
 
@@ -43,6 +44,7 @@ python3 catalog.py serve
 | `search <keyword>` | find files across all drives |
 | `report` | per-drive summary |
 | `dedup` | duplicate candidates across drives |
+| `reclaim [--junk\|--big-old\|--by-type]` | what can be deleted/moved to free space (read-only) |
 | `groups --by-client` | cluster jobs by client name |
 | `export-folders-csv out.csv --smart-depth` | folder rollup for Excel |
 | `export-obsidian <vault>` | one Markdown note per drive |
