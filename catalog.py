@@ -12,6 +12,7 @@ USAGE
   python3 catalog.py report
   python3 catalog.py groups [--threshold 0.72] [--min-drives 2]
   python3 catalog.py dedup [--min-size-mb 1]
+  python3 catalog.py reclaim [--junk] [--big-old] [--by-type]
   python3 catalog.py serve [--port 8765] [--no-browser]
   python3 catalog.py export-obsidian <vault_folder>
 
@@ -663,6 +664,331 @@ def cmd_dedup(args):
         print(f"(แสดง {len(groups)} กลุ่มแรกจาก {ngroups} กลุ่ม - เรียงตามพื้นที่ที่คืนได้)")
 
 
+# =============================== reclaim space ===============================
+# "อะไรลบ/ย้ายได้บ้าง" - answered from catalog metadata only: no drive needs to be
+# plugged in, no file is ever read, and nothing here deletes anything. Every code
+# path below is read-only by construction; the UI hands the user a list.
+
+# Anything outside this window is a broken timestamp, not an old file. Real
+# catalogs contain files dated 2262 and 1904 (copies, bad cameras, filesystem
+# quirks) - scoring by age without this guard puts garbage at the top.
+MTIME_FLOOR = 946684800.0          # 2000-01-01
+YEAR_SECONDS = 365 * 86400
+
+# Junk rules. `where` is a fixed SQL fragment (never user input). tier "safe" =
+# the app that made it can regenerate it; tier "review" = looks like junk but
+# losing it costs something (Auto-Save is a project backup, a proxy may still be
+# linked in an open timeline).
+# NOTE: .DS_Store / Thumbs.db / desktop.ini can never show up here - SKIP_FILES
+# drops them at scan time, so the catalog has no record of them at all.
+RECLAIM_RULES = [
+    {"id": "premiere_previews", "tier": "safe",
+     "label": "Premiere Video/Audio Previews",
+     "note": "ไฟล์พรีวิวที่ Premiere สร้างใหม่ได้เอง",
+     "where": "relpath LIKE '%Adobe Premiere Pro Video Previews%' "
+              "OR relpath LIKE '%Adobe Premiere Pro Audio Previews%'"},
+    {"id": "premiere_cache", "tier": "safe",
+     "label": "Premiere peak/conform (.pek/.cfa)",
+     "note": "ไฟล์ waveform/conform สร้างใหม่อัตโนมัติเมื่อเปิดงาน",
+     "where": "ext IN ('.pek', '.cfa')"},
+    {"id": "lightroom_previews", "tier": "safe",
+     "label": "Lightroom previews",
+     "note": "พรีวิวของ Lightroom สร้างใหม่ได้จากไฟล์ต้นฉบับ",
+     "where": "ext = '.lrprev' OR relpath LIKE '%Previews.lrdata%'"},
+    {"id": "resolve_cache", "tier": "safe",
+     "label": "DaVinci Resolve cache / ProxyMedia",
+     "note": "cache ที่ Resolve สร้างใหม่ได้",
+     "where": "relpath LIKE '%CacheClip%' OR relpath LIKE '%ProxyMedia%'"},
+    {"id": "fcp_render", "tier": "safe",
+     "label": "Final Cut render / transcoded media",
+     "note": "ไฟล์ render ของ Final Cut สร้างใหม่ได้",
+     "where": "relpath LIKE '%Render Files%' OR relpath LIKE '%Transcoded Media%'"},
+    {"id": "appledouble", "tier": "safe",
+     "label": "AppleDouble (ไฟล์ ._)",
+     "note": "เศษ metadata ที่ macOS ทิ้งไว้บนไดรฟ์ exFAT/FAT",
+     "where": "filename LIKE '._%'"},
+    {"id": "temp", "tier": "safe",
+     "label": "ไฟล์ชั่วคราว (.tmp/.temp/.bak)",
+     "note": "ของค้างจากโปรแกรมที่ปิดไม่สมบูรณ์",
+     "where": "ext IN ('.tmp', '.temp', '.bak')"},
+    {"id": "premiere_autosave", "tier": "review",
+     "label": "Premiere Auto-Save",
+     "note": "เป็นไฟล์โปรเจกต์สำรอง - ลบแล้วกู้งานย้อนหลังไม่ได้ ดูก่อนลบ",
+     "where": "relpath LIKE '%Auto-Save%'"},
+    {"id": "proxy", "tier": "review",
+     "label": "โฟลเดอร์ proxy",
+     "note": "ถ้ายังตัดงานนั้นอยู่ proxy อาจถูกลิงก์ในไทม์ไลน์ ดูก่อนลบ",
+     "where": "relpath LIKE '%/Proxy/%' OR relpath LIKE '%/Proxies/%' "
+              "OR relpath LIKE 'Proxy/%' OR relpath LIKE 'Proxies/%'"},
+]
+_RULES_BY_ID = {r["id"]: r for r in RECLAIM_RULES}
+
+# ext -> bucket for the "พื้นที่หายไปไหน" rollup. Anything unlisted lands in "อื่นๆ".
+RECLAIM_TYPES = [
+    ("วิดีโอ", ['.mp4', '.mov', '.r3d', '.braw', '.mxf', '.avi', '.mts', '.m2ts',
+                '.m4v', '.insv', '.mkv', '.wmv', '.lrf']),
+    ("ภาพ RAW", ['.cr3', '.cr2', '.nef', '.dng', '.arw', '.raf', '.orf', '.rw2', '.srw']),
+    ("ภาพ", ['.jpg', '.jpeg', '.png', '.heic', '.tif', '.tiff', '.webp', '.psd',
+             '.psb', '.gif']),
+    ("เสียง", ['.wav', '.mp3', '.aif', '.aiff', '.m4a', '.flac', '.aac']),
+    ("ไฟล์งาน/โปรเจกต์", ['.prproj', '.aep', '.drp', '.skp', '.dwg', '.indd', '.ai',
+                          '.fcpxml', '.edl', '.aaf']),
+    ("บีบอัด/อิมเมจ", ['.zip', '.rar', '.7z', '.dmg', '.iso', '.tar', '.gz']),
+    ("เอกสาร", ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv']),
+    ("cache/ชั่วคราว", ['.pek', '.cfa', '.lrprev', '.tmp', '.temp', '.bak', '.thm']),
+]
+
+_RECLAIM_CACHE = {}
+_RECLAIM_CACHE_LOCK = threading.Lock()
+
+
+def _reclaim_cache_key(conn):
+    """Anything that changes the answer (a scan, a forget) moves last_scanned or
+    the drive count, so this is enough to invalidate by itself."""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(last_scanned), 0), COUNT(*) FROM drives").fetchone()
+    return "%s:%s" % (row[0], row[1])
+
+
+def _cached(conn, name, build):
+    key = _reclaim_cache_key(conn) + "|" + name
+    with _RECLAIM_CACHE_LOCK:
+        if key in _RECLAIM_CACHE:
+            return _RECLAIM_CACHE[key]
+    value = build()
+    with _RECLAIM_CACHE_LOCK:
+        for stale in [k for k in _RECLAIM_CACHE if not k.startswith(key.split("|")[0])]:
+            del _RECLAIM_CACHE[stale]     # drop everything from an older catalog state
+        _RECLAIM_CACHE[key] = value
+    return value
+
+
+def _safe_date(mtime):
+    """Formatted date, or None when the timestamp is impossible (see MTIME_FLOOR)."""
+    if mtime is None or mtime < MTIME_FLOOR or mtime > time.time() + 86400:
+        return None
+    return time.strftime("%Y-%m-%d", time.localtime(mtime))
+
+
+def reclaim_junk_summary(conn):
+    """Per-rule file count + bytes. Measured on a 2M-row catalog: running the
+    rules one at a time takes ~3.7s, folding them into a single pass with CASE
+    WHEN takes ~5.7s - some rules ride the filename index, and one pass forces
+    every predicate onto every row. So: one query per rule, and cache it."""
+    def build():
+        out = []
+        for rule in RECLAIM_RULES:
+            n, b = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE " + rule["where"]
+            ).fetchone()
+            out.append({"id": rule["id"], "label": rule["label"], "tier": rule["tier"],
+                        "note": rule["note"], "files": n, "bytes": b,
+                        "bytes_human": human_size(b)})
+        return out
+    return _cached(conn, "junk", build)
+
+
+def reclaim_junk_files(conn, rule_id, limit=500):
+    rule = _RULES_BY_ID.get(rule_id)
+    if rule is None:
+        return None
+    rows = conn.execute(
+        "SELECT drive_label, relpath, size, mtime FROM files WHERE " + rule["where"] +
+        " ORDER BY size DESC LIMIT ?", (limit,)).fetchall()
+    return [{"drive": d, "path": p, "files": 1, "size": s,
+             "size_human": human_size(s), "mdate": _safe_date(mt)}
+            for d, p, s, mt in rows]
+
+
+def reclaim_bigold(conn, min_bytes, years, drive=None, mode="file", limit=200):
+    """Big files (or job folders) nobody has touched in a long time, ranked by how
+    much space deleting them would actually return. Files with a broken mtime are
+    excluded and reported separately - see reclaim_bad_mtime()."""
+    now = time.time()
+    cutoff = now - years * YEAR_SECONDS
+    where_drive = " AND drive_label = ?" if drive else ""
+
+    if mode == "folder":
+        args = [MTIME_FLOOR, now + 86400, cutoff]
+        if drive:
+            args.append(drive)
+        rows = conn.execute(
+            "SELECT drive_label, depth1, COUNT(*), SUM(size), MAX(mtime) FROM files "
+            "WHERE mtime BETWEEN ? AND ? AND mtime < ?" + where_drive +
+            " GROUP BY drive_label, depth1 HAVING SUM(size) >= ? "
+            "ORDER BY SUM(size) DESC LIMIT ?", args + [min_bytes, limit]).fetchall()
+        return [{"drive": d, "path": f or "(root)", "files": n, "size": b,
+                 "size_human": human_size(b), "mdate": _safe_date(newest),
+                 "years": round((now - newest) / YEAR_SECONDS, 1)}
+                for d, f, n, b, newest in rows]
+
+    args = [MTIME_FLOOR, now + 86400, cutoff, min_bytes]
+    if drive:
+        args.append(drive)
+    args += [now, float(YEAR_SECONDS), limit]
+    rows = conn.execute(
+        "SELECT drive_label, relpath, size, mtime FROM files "
+        "WHERE mtime BETWEEN ? AND ? AND mtime < ? AND size >= ?" + where_drive +
+        " ORDER BY size * (1.0 + (? - mtime) / ?) DESC LIMIT ?", args).fetchall()
+    return [{"drive": d, "path": p, "files": 1, "size": s, "size_human": human_size(s),
+             "mdate": _safe_date(mt), "years": round((now - mt) / YEAR_SECONDS, 1)}
+            for d, p, s, mt in rows]
+
+
+def reclaim_bigold_total(conn, min_bytes, years, drive=None, mode="file"):
+    """Everything matching the filter, not just the page being displayed - the
+    headline number has to be the real total or it quietly understates the win."""
+    now = time.time()
+    args = [MTIME_FLOOR, now + 86400, now - years * YEAR_SECONDS]
+    where_drive = " AND drive_label = ?" if drive else ""
+    if mode == "folder":
+        if drive:
+            args.append(drive)
+        n, b = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(b), 0) FROM (SELECT SUM(size) b FROM files "
+            "WHERE mtime BETWEEN ? AND ? AND mtime < ?" + where_drive +
+            " GROUP BY drive_label, depth1 HAVING SUM(size) >= ?)",
+            args + [min_bytes]).fetchone()
+    else:
+        args.append(min_bytes)
+        if drive:
+            args.append(drive)
+        n, b = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files "
+            "WHERE mtime BETWEEN ? AND ? AND mtime < ? AND size >= ?" + where_drive,
+            args).fetchone()
+    return {"items": n, "bytes": b, "bytes_human": human_size(b)}
+
+
+def reclaim_mark_duplicates(conn, rows):
+    """Flag rows that have a same-name same-size copy on another drive - those are
+    the safest ones to delete first. Same caveat as the duplicates section: this
+    compares filename + size, never contents, so it means 'almost certainly the
+    same file', not 'proven identical'."""
+    for r in rows:
+        if r.get("files", 1) != 1:
+            continue
+        n = conn.execute(
+            "SELECT COUNT(DISTINCT drive_label) FROM files WHERE filename = ? AND size = ?",
+            (os.path.basename(r["path"]), r["size"])).fetchone()[0]
+        r["copies_elsewhere"] = max(0, n - 1)
+    return rows
+
+
+def reclaim_by_type(conn):
+    """Where the space actually went, per drive and overall."""
+    def build():
+        bucket_of = {}
+        for label, exts in RECLAIM_TYPES:
+            for e in exts:
+                bucket_of[e] = label
+        per_drive, totals = {}, {}
+        for drive, ext, n, b in conn.execute(
+                "SELECT drive_label, ext, COUNT(*), SUM(size) FROM files "
+                "GROUP BY drive_label, ext"):
+            label = bucket_of.get((ext or "").lower(), "อื่นๆ")
+            cur = per_drive.setdefault(drive, {}).setdefault(label, [0, 0])
+            cur[0] += n
+            cur[1] += b or 0
+            t = totals.setdefault(label, [0, 0])
+            t[0] += n
+            t[1] += b or 0
+
+        def pack(d):
+            out = [{"label": k, "files": v[0], "bytes": v[1], "bytes_human": human_size(v[1])}
+                   for k, v in d.items()]
+            out.sort(key=lambda x: -x["bytes"])
+            return out
+
+        return {"total": pack(totals), "drives": {k: pack(v) for k, v in per_drive.items()}}
+    return _cached(conn, "bytype", build)
+
+
+def reclaim_bad_mtime(conn):
+    """Files whose timestamp is impossible - they can't be judged by age, so they
+    get their own bucket instead of silently skewing the rankings."""
+    def build():
+        n, b = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE mtime < ? OR mtime > ?",
+            (MTIME_FLOOR, time.time() + 86400)).fetchone()
+        return {"files": n, "bytes": b, "bytes_human": human_size(b)}
+    return _cached(conn, "badmtime", build)
+
+
+def reclaim_markdown(title, rows, note=""):
+    """Markdown checklist - tick items off while deleting by hand, and it drops
+    straight into Obsidian next to the export-obsidian notes."""
+    total = sum(r.get("size", 0) for r in rows)
+    lines = ["# " + title, ""]
+    if note:
+        lines += ["> " + note, ""]
+    lines += ["สร้างโดย HDDCAT %s · %s" % (__version__, time.strftime("%Y-%m-%d %H:%M")), "",
+              "รวม %s รายการ · คืนพื้นที่ได้ ~%s" % (format(len(rows), ","), human_size(total)), ""]
+    by_drive = {}
+    for r in rows:
+        by_drive.setdefault(r["drive"], []).append(r)
+    for drive in sorted(by_drive):
+        items = by_drive[drive]
+        lines += ["## %s — %s" % (drive, human_size(sum(i.get("size", 0) for i in items))), ""]
+        for r in items:
+            extra = []
+            if r.get("mdate"):
+                extra.append("แก้ไขล่าสุด " + r["mdate"])
+            if r.get("files", 1) > 1:
+                extra.append("%s ไฟล์" % format(r["files"], ","))
+            if r.get("copies_elsewhere"):
+                extra.append("มีสำเนาอีก %d ไดรฟ์" % r["copies_elsewhere"])
+            suffix = ("  _(%s)_" % " · ".join(extra)) if extra else ""
+            lines.append("- [ ] `%s` — **%s**%s" % (r["path"], r["size_human"], suffix))
+        lines.append("")
+    lines += ["---", "path เป็นตำแหน่งภายในไดรฟ์นั้น · HDDCAT ไม่ลบไฟล์ให้ "
+              "รายการนี้ไว้ตรวจแล้วลบเอง"]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_reclaim(args):
+    conn = get_conn(args.db)
+    if args.junk or not (args.big_old or args.by_type):
+        print("=== ของที่ลบได้ (cache/ไฟล์ขยะ) ===")
+        total = 0
+        for r in reclaim_junk_summary(conn):
+            if not r["files"]:
+                continue
+            total += r["bytes"]
+            tier = "ลบได้" if r["tier"] == "safe" else "ดูก่อน"
+            print("  [%s] %-38s %8s ไฟล์  %9s"
+                  % (tier, r["label"], format(r["files"], ","), r["bytes_human"]))
+        print("  รวมคืนได้ ~%s\n" % human_size(total))
+    if args.big_old:
+        rows = reclaim_mark_duplicates(conn, reclaim_bigold(
+            conn, int(args.min_gb * 1024 ** 3), args.years,
+            mode="folder" if args.folders else "file", limit=args.limit))
+        kind = "โฟลเดอร์" if args.folders else "ไฟล์"
+        print("=== %sใหญ่ที่ไม่ถูกแตะเกิน %s ปี (>= %sGB) ==="
+              % (kind, args.years, args.min_gb))
+        for r in rows:
+            dup = ("  [มีสำเนาอีก %d ไดรฟ์]" % r["copies_elsewhere"]) if r.get("copies_elsewhere") else ""
+            print("  [%s] %s  %s (ล่าสุด %s)%s"
+                  % (r["drive"], r["path"], r["size_human"], r["mdate"] or "?", dup))
+        print("  รวม %d รายการ ~%s\n" % (len(rows), human_size(sum(r["size"] for r in rows))))
+        if args.md:
+            with open(args.md, "w", encoding="utf-8") as f:
+                f.write(reclaim_markdown("%sใหญ่ที่ไม่ถูกแตะเกิน %s ปี" % (kind, args.years), rows))
+            print("  เขียน checklist ไปที่ %s" % args.md)
+    if args.by_type:
+        print("=== พื้นที่หายไปไหน ===")
+        for r in reclaim_by_type(conn)["total"]:
+            print("  %-22s %9s ไฟล์  %9s"
+                  % (r["label"], format(r["files"], ","), r["bytes_human"]))
+        print()
+    bad = reclaim_bad_mtime(conn)
+    if bad["files"]:
+        print("หมายเหตุ: มี %s ไฟล์ (%s) ที่วันที่แก้ไขเชื่อไม่ได้ (อนาคต/ก่อนปี 2000) "
+              "- ไม่ถูกนับในรายการ 'ไม่ถูกแตะนาน'"
+              % (format(bad["files"], ","), bad["bytes_human"]))
+    conn.close()
+
+
 def cmd_forget(args):
     conn = get_conn(args.db)
     if not args.yes:
@@ -709,6 +1035,7 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
 
     python3 catalog.py scan /Volumes/ไดรฟ์ของคุณ --label ชื่อไดรฟ์
     python3 catalog.py search คำค้น
+    python3 catalog.py reclaim --big-old --md เคลียร์พื้นที่.md
     python3 catalog.py serve
 
 ---
@@ -1478,7 +1805,67 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
   font-size: 25px; margin: 14px 0 8px; color: var(--color-heading-1); }
 .home-first p { font-size: 14px; color: var(--counter-title); line-height: 1.75; margin-bottom: 22px; }
 
+/* ---- reclaim space tab ---- */
+.rc-hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px; margin-bottom: 20px; }
+.rc-hero .kpi-num { color: var(--color-primary); }
+.rc-sec { margin-bottom: 26px; }
+.rc-sec > h2 { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  font-size: 18px; margin-bottom: 4px; }
+.rc-sec > .desc { font-size: 13px; color: var(--counter-title); margin-bottom: 12px;
+  line-height: 1.7; }
+.rc-card { background: var(--color-white); border: 1px solid var(--color-border);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-card); overflow: hidden; }
+.rc-rule { display: flex; align-items: center; gap: 12px; padding: 13px 18px;
+  border-top: 1px solid rgba(5, 1, 28, 0.06); cursor: pointer; }
+.rc-rule:first-child { border-top: none; }
+.rc-rule:hover { background: rgba(102, 51, 238, 0.03); }
+.rc-rule-main { flex: 1; min-width: 0; }
+.rc-rule-label { font-weight: var(--p-medium); font-size: 14px; color: var(--color-title); }
+.rc-rule-note { font-size: 12px; color: var(--counter-title); margin-top: 2px; }
+.rc-rule-size { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  font-size: 15px; color: var(--color-heading-1); white-space: nowrap; }
+.rc-rule-files { font-size: 12px; color: var(--counter-title); white-space: nowrap;
+  min-width: 92px; text-align: right; }
+.tier { font-size: 11px; font-weight: var(--p-semi-bold); border-radius: 20px;
+  padding: 3px 10px; white-space: nowrap; }
+.tier.safe { color: #0f7b33; background: rgba(38, 207, 75, 0.14); }
+.tier.review { color: #9a5b00; background: rgba(255, 143, 60, 0.16); }
+.rc-detail { padding: 0 18px 16px; }
+.rc-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0 0; }
+.rc-actions .btn { padding: 8px 18px; font-size: 13px; }
+.rc-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.rc-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  margin-bottom: 12px; }
+.rc-filters select, .rc-filters input { font-family: inherit; font-size: 13.5px;
+  color: var(--color-title); background: var(--color-white);
+  border: 1px solid var(--color-border); border-radius: var(--radius-btn);
+  padding: 9px 14px; outline: none; }
+.rc-filters label { font-size: 13px; color: var(--counter-title); }
+.rc-toggle { display: inline-flex; border: 1px solid var(--color-border);
+  border-radius: var(--radius-btn); overflow: hidden; }
+.rc-toggle button { font-family: inherit; font-size: 13px; padding: 9px 16px;
+  border: none; background: var(--color-white); color: var(--color-title); cursor: pointer; }
+.rc-toggle button.on { background: var(--color-primary); color: var(--color-white); }
+.rc-badge-dup { font-size: 11px; font-weight: var(--p-semi-bold); color: var(--color-primary);
+  background: rgba(102, 51, 238, 0.09); border-radius: 20px; padding: 2px 8px;
+  white-space: nowrap; }
+.rc-bar { display: flex; align-items: center; gap: 12px; padding: 9px 0;
+  border-top: 1px solid rgba(5, 1, 28, 0.06); }
+.rc-bar:first-child { border-top: none; }
+.rc-bar-name { width: 150px; font-size: 13px; color: var(--color-title); flex: none; }
+.rc-bar-track { flex: 1; height: 9px; border-radius: 5px; background: rgba(5, 1, 28, 0.07);
+  overflow: hidden; }
+.rc-bar-track i { display: block; height: 100%; background: var(--color-primary); }
+.rc-bar-val { width: 150px; text-align: right; font-size: 12.5px; color: var(--counter-title);
+  flex: none; white-space: nowrap; }
+.rc-warn { font-size: 12.5px; color: var(--counter-title); background: rgba(255, 143, 60, .10);
+  border: 1px solid rgba(255, 143, 60, .3); border-radius: 10px; padding: 11px 15px;
+  line-height: 1.7; margin-bottom: 16px; }
+.rc-copied { font-size: 12.5px; color: var(--color-success); align-self: center; }
+
 /* ---- panels (scan / dedup) ---- */
+
 .panel { background: var(--color-white); border: 1px solid var(--color-border);
   border-radius: var(--radius-card); box-shadow: var(--shadow-card);
   padding: 24px; margin-top: 18px; max-width: 760px; }
@@ -1584,7 +1971,7 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
       <button class="tab-btn" data-tab="library">คลังงาน</button>
       <button class="tab-btn" data-tab="drives">ไดรฟ์</button>
       <button class="tab-btn" data-tab="scan">สแกน</button>
-      <button class="tab-btn" data-tab="dedup">ไฟล์ซ้ำ</button>
+      <button class="tab-btn" data-tab="reclaim">เคลียร์พื้นที่</button>
     </nav>
     <div class="topbar-right">
       <span class="stat-chip" id="db-info"></span>
@@ -1629,7 +2016,7 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
       </div>
       <div class="home-actions" style="margin-top:0">
         <button class="btn btn-border" id="home-go-library">เปิดคลังงาน</button>
-        <button class="btn btn-border" id="home-go-dedup">หาไฟล์ซ้ำ</button>
+        <button class="btn btn-border" id="home-go-dedup">เคลียร์พื้นที่</button>
         <button class="btn" id="home-go-scan">สแกนไดรฟ์</button>
       </div>
     </div>
@@ -1717,24 +2104,93 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
   </div>
 </section>
 
-<!-- ================= DEDUP ================= -->
-<section class="view" id="view-dedup">
-  <div class="panel">
-    <h2>หาไฟล์ซ้ำ</h2>
-    <p class="desc">เทียบจากชื่อไฟล์ + ขนาดที่ตรงกันเป๊ะใน catalog (ไม่ได้อ่านเนื้อไฟล์
-      เพราะไดรฟ์อาจไม่ได้เสียบอยู่) — อ่านอย่างเดียว ไม่มีการลบไฟล์</p>
-    <div class="form-row">
-      <select id="dedup-min">
-        <option value="1048576">ขนาด ≥ 1 MB</option>
-        <option value="10485760" selected>ขนาด ≥ 10 MB</option>
-        <option value="104857600">ขนาด ≥ 100 MB</option>
-        <option value="1073741824">ขนาด ≥ 1 GB</option>
-      </select>
-      <button class="btn" id="dedup-btn">ค้นหาไฟล์ซ้ำ</button>
-    </div>
-    <div class="progress-box" id="dedup-progress"></div>
+<!-- ================= RECLAIM SPACE ================= -->
+<section class="view" id="view-reclaim">
+
+  <div class="rc-warn">
+    HDDCAT <b>ไม่ลบไฟล์ให้</b> — หน้านี้ชี้เป้าและทำรายการให้เอาไปตรวจแล้วลบเอง
+    ทุกอย่างคำนวณจากข้อมูลใน catalog ไม่ได้เปิดอ่านไฟล์จริง
+    <span id="rc-stale"></span>
   </div>
-  <div id="dedup-results"></div>
+
+  <div class="rc-hero">
+    <div class="kpi"><div class="kpi-num" id="rc-kpi-junk">—</div>
+      <div class="kpi-label">ลบ cache/ขยะได้</div></div>
+    <div class="kpi"><div class="kpi-num" id="rc-kpi-big">—</div>
+      <div class="kpi-label">ไฟล์ใหญ่ที่ไม่ถูกแตะนาน</div></div>
+    <div class="kpi"><div class="kpi-num small" id="rc-kpi-top">—</div>
+      <div class="kpi-label">ชนิดไฟล์ที่กินที่สุด</div></div>
+  </div>
+
+  <!-- 1. junk -->
+  <div class="rc-sec">
+    <h2>ของที่ลบได้ (cache / ไฟล์ขยะ)</h2>
+    <p class="desc">โปรแกรมตัดต่อสร้างไฟล์พวกนี้ขึ้นมาใหม่ได้เอง —
+      <span class="tier safe">ลบได้</span> คือสร้างใหม่ได้แน่นอน ·
+      <span class="tier review">ดูก่อน</span> คือหน้าตาเหมือนขยะแต่ลบแล้วมีอะไรหาย
+      <br>หมายเหตุ: <code>.DS_Store</code> / <code>Thumbs.db</code> ไม่อยู่ในนี้
+      เพราะ HDDCAT ข้ามไม่เก็บเข้า catalog ตั้งแต่ตอนสแกน</p>
+    <div class="rc-card" id="rc-junk"></div>
+  </div>
+
+  <!-- 2. big + old -->
+  <div class="rc-sec">
+    <h2>ใหญ่และไม่ได้แตะมานาน</h2>
+    <p class="desc">เรียงตาม “ลบแล้วคืนพื้นที่ได้เท่าไหร่” (ขนาด × อายุ) —
+      ไฟล์ที่วันที่แก้ไขเชื่อไม่ได้จะถูกกันออกจากรายการนี้</p>
+    <div class="rc-filters">
+      <div class="rc-toggle">
+        <button id="rc-mode-file" class="on">รายไฟล์</button>
+        <button id="rc-mode-folder">รายโฟลเดอร์งาน</button>
+      </div>
+      <label>ขนาดอย่างน้อย</label>
+      <select id="rc-gb">
+        <option value="0.5">500 MB</option>
+        <option value="1" selected>1 GB</option>
+        <option value="5">5 GB</option>
+        <option value="50">50 GB</option>
+      </select>
+      <label>ไม่ถูกแตะเกิน</label>
+      <select id="rc-years">
+        <option value="1">1 ปี</option>
+        <option value="2">2 ปี</option>
+        <option value="3" selected>3 ปี</option>
+        <option value="5">5 ปี</option>
+      </select>
+      <select id="rc-drive"><option value="">ทุกไดรฟ์</option></select>
+    </div>
+    <div id="rc-big"></div>
+  </div>
+
+  <!-- 3. where did the space go -->
+  <div class="rc-sec">
+    <h2>พื้นที่หายไปไหน</h2>
+    <p class="desc">แยกตามชนิดไฟล์ เลือกดูเฉพาะไดรฟ์ได้</p>
+    <div class="rc-filters">
+      <select id="rc-type-drive"><option value="">ทุกไดรฟ์รวมกัน</option></select>
+    </div>
+    <div class="rc-card" style="padding: 8px 18px 14px" id="rc-bytype"></div>
+  </div>
+
+  <!-- 4. duplicates (moved in from the old tab) -->
+  <div class="rc-sec">
+    <h2>ไฟล์ซ้ำข้ามไดรฟ์</h2>
+    <p class="desc">เทียบจากชื่อไฟล์ + ขนาดที่ตรงกันเป๊ะใน catalog (ไม่ได้อ่านเนื้อไฟล์
+      เพราะไดรฟ์อาจไม่ได้เสียบอยู่) — แปลว่า “แทบจะแน่ใจว่าไฟล์เดียวกัน” ไม่ใช่ “พิสูจน์แล้ว”</p>
+    <div class="panel" style="margin-top: 0">
+      <div class="form-row">
+        <select id="dedup-min">
+          <option value="1048576">ขนาด ≥ 1 MB</option>
+          <option value="10485760" selected>ขนาด ≥ 10 MB</option>
+          <option value="104857600">ขนาด ≥ 100 MB</option>
+          <option value="1073741824">ขนาด ≥ 1 GB</option>
+        </select>
+        <button class="btn" id="dedup-btn">ค้นหาไฟล์ซ้ำ</button>
+      </div>
+      <div class="progress-box" id="dedup-progress"></div>
+    </div>
+    <div id="dedup-results"></div>
+  </div>
 </section>
 
 </main>
@@ -1761,6 +2217,7 @@ document.querySelectorAll(".tab-btn").forEach(b => b.addEventListener("click", (
   document.querySelectorAll("section.view").forEach(v =>
     v.classList.toggle("active", v.id === "view-" + b.dataset.tab));
   history.replaceState(null, "", "#" + b.dataset.tab);
+  if (b.dataset.tab === "reclaim") ensureReclaimLoaded();
 }));
 function gotoTab(name) { document.querySelector(`.tab-btn[data-tab=${name}]`).click(); }
 
@@ -1888,7 +2345,7 @@ async function loadFolders() {
 /* ---------- home dashboard ---------- */
 $("topbar-scan").addEventListener("click", () => gotoTab("scan"));
 $("home-go-library").addEventListener("click", () => gotoTab("library"));
-$("home-go-dedup").addEventListener("click", () => gotoTab("dedup"));
+$("home-go-dedup").addEventListener("click", () => gotoTab("reclaim"));
 $("home-go-scan").addEventListener("click", () => gotoTab("scan"));
 $("home-first-scan").addEventListener("click", () => gotoTab("scan"));
 $("home-first-cat").innerHTML = CAT_LG;
@@ -2014,6 +2471,12 @@ $("home-q").addEventListener("input", () => {
 async function loadDrives() {
   const res = await api("/api/drives");
   if (!res.ok) { $("drive-cards").innerHTML = esc(res.error); return; }
+  ["rc-drive", "rc-type-drive"].forEach((id, i) => {
+    const el = $(id);
+    const first = el.options[0].outerHTML;
+    el.innerHTML = first + res.drives.map(d =>
+      `<option value="${esc(d.label)}">${esc(d.label)}</option>`).join("");
+  });
   $("db-info").textContent =
     `${res.drives.length} ไดรฟ์ · ${res.drives.reduce((s, d) => s + d.files, 0).toLocaleString()} ไฟล์ใน catalog`;
   renderHomeStats(res.drives);
@@ -2082,7 +2545,171 @@ $("scan-btn").addEventListener("click", async () => {
   pollJobs();
 });
 
+/* ---------- reclaim space ---------- */
+let RC_SUMMARY = null, rcMode = "file", rcRows = [], rcOpenRule = null, rcJunkRows = {};
+
+function rcTierBadge(t) {
+  return t === "safe" ? '<span class="tier safe">ลบได้</span>'
+                      : '<span class="tier review">ดูก่อน</span>';
+}
+
+/* one shared clipboard helper: WKWebView allows navigator.clipboard on
+   127.0.0.1 (a secure context), execCommand is the fallback for old WebKit */
+async function copyLines(lines, btn) {
+  const text = lines.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } finally { ta.remove(); }
+  }
+  if (btn) {
+    const note = document.createElement("span");
+    note.className = "rc-copied";
+    note.textContent = `คัดลอก ${lines.length.toLocaleString()} บรรทัดแล้ว`;
+    btn.parentNode.querySelectorAll(".rc-copied").forEach(n => n.remove());
+    btn.parentNode.appendChild(note);
+    setTimeout(() => note.remove(), 2600);
+  }
+}
+
+function rcPathLines(rows) {
+  return rows.map(r => `[${r.drive}] ${r.path || r.relpath}`);
+}
+
+function rcRowsTable(rows, withDup) {
+  if (!rows.length) return `<div class="hint" style="padding:12px 0">ไม่มีรายการที่ตรงกับเงื่อนไข</div>`;
+  return `<div class="tbl-wrap"><table><tbody>
+    ${rows.map(r => `<tr>
+      <td><span class="badge drive">${esc(r.drive)}</span></td>
+      <td class="clip" style="max-width:560px" title="${esc(r.path || r.relpath)}">${esc(r.path || r.relpath)}</td>
+      ${withDup ? `<td>${r.copies_elsewhere ? `<span class="rc-badge-dup">มีสำเนาอีก ${r.copies_elsewhere} ไดรฟ์</span>` : ""}</td>` : ""}
+      <td class="num muted">${r.files > 1 ? r.files.toLocaleString() + " ไฟล์" : ""}</td>
+      <td class="num">${esc(r.size_human)}</td>
+      <td class="num muted">${r.mdate ? esc(r.mdate) : "?"}</td>
+    </tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+async function loadReclaimSummary() {
+  const res = await api("/api/reclaim/summary");
+  if (!res.ok) { $("rc-junk").innerHTML = `<div class="hint" style="padding:16px">โหลดไม่สำเร็จ</div>`; return; }
+  RC_SUMMARY = res;
+
+  const junkTotal = res.junk.reduce((s, r) => s + r.bytes, 0);
+  $("rc-kpi-junk").textContent = human(junkTotal);
+  const top = res.bytype.total[0];
+  $("rc-kpi-top").textContent = top ? `${top.label} · ${human(top.bytes)}` : "—";
+
+  const shown = res.junk.filter(r => r.files > 0);
+  $("rc-junk").innerHTML = shown.length ? shown.map(r => `
+    <div class="rc-rule" data-rule="${esc(r.id)}">
+      ${rcTierBadge(r.tier)}
+      <div class="rc-rule-main">
+        <div class="rc-rule-label">${esc(r.label)}</div>
+        <div class="rc-rule-note">${esc(r.note)}</div>
+      </div>
+      <div class="rc-rule-files">${r.files.toLocaleString()} ไฟล์</div>
+      <div class="rc-rule-size">${esc(r.bytes_human)}</div>
+    </div>
+    <div class="rc-detail" id="rc-detail-${esc(r.id)}" hidden></div>`).join("")
+    : `<div class="hint" style="padding:16px">ไม่เจอ cache หรือไฟล์ขยะในคลังนี้</div>`;
+
+  document.querySelectorAll("#rc-junk .rc-rule").forEach(row =>
+    row.addEventListener("click", () => toggleJunkRule(row.dataset.rule)));
+
+  if (res.bad_mtime && res.bad_mtime.files)
+    $("rc-stale").innerHTML = `<br>มี ${res.bad_mtime.files.toLocaleString()} ไฟล์
+      (${esc(res.bad_mtime.bytes_human)}) ที่วันที่แก้ไขเชื่อไม่ได้ — ไม่ถูกนับในรายการ “ไม่ได้แตะมานาน”`;
+
+  renderByType();
+}
+
+async function toggleJunkRule(id) {
+  const box = $("rc-detail-" + id);
+  if (!box) return;
+  if (!box.hidden) { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="hint">${CAT_SM} กำลังโหลด…</div>`;
+  const res = await api(`/api/reclaim/junk?rule=${encodeURIComponent(id)}&limit=500`);
+  if (!res.ok) { box.innerHTML = `<div class="hint">โหลดไม่สำเร็จ</div>`; return; }
+  rcJunkRows[id] = res.rows;
+  box.innerHTML = rcRowsTable(res.rows, false) + `
+    <div class="rc-actions">
+      <a class="btn btn-border" href="/api/reclaim/export?kind=junk&rule=${encodeURIComponent(id)}"
+         download>ดาวน์โหลด checklist (.md)</a>
+      <button class="btn btn-border" data-copy-rule="${esc(id)}">คัดลอก path ทั้งก้อน</button>
+    </div>`;
+  box.querySelector("[data-copy-rule]").addEventListener("click", e =>
+    copyLines(rcPathLines(rcJunkRows[id] || []), e.target));
+}
+
+async function loadBigOld() {
+  const box = $("rc-big");
+  box.innerHTML = `<div class="hint">${CAT_SM} กำลังคำนวณ…</div>`;
+  const gb = $("rc-gb").value, years = $("rc-years").value, drive = $("rc-drive").value;
+  const res = await api(`/api/reclaim/bigold?gb=${gb}&years=${years}&mode=${rcMode}` +
+                        `&drive=${encodeURIComponent(drive)}&limit=200`);
+  if (!res.ok) { box.innerHTML = `<div class="hint">โหลดไม่สำเร็จ</div>`; return; }
+  rcRows = res.rows;
+  /* headline = every match, not just the rows on screen */
+  const total = res.total || {items: rcRows.length,
+                              bytes: rcRows.reduce((s, r) => s + r.size, 0)};
+  $("rc-kpi-big").textContent = human(total.bytes);
+  const capped = total.items > rcRows.length
+    ? ` (แสดง ${rcRows.length.toLocaleString()} อันดับแรก)` : "";
+  const qs = `kind=bigold&gb=${gb}&years=${years}&mode=${rcMode}&drive=${encodeURIComponent(drive)}&limit=1000`;
+  box.innerHTML = `
+    <div class="dedup-head">${total.items.toLocaleString()} รายการ${capped} ·
+      คืนพื้นที่ได้ <span class="save">~${human(total.bytes)}</span></div>
+    ${rcRowsTable(rcRows, rcMode === "file")}
+    <div class="rc-actions">
+      <a class="btn btn-border" href="/api/reclaim/export?${qs}" download>ดาวน์โหลด checklist (.md)</a>
+      <button class="btn btn-border" id="rc-copy-big">คัดลอก path ทั้งก้อน</button>
+    </div>`;
+  $("rc-copy-big").addEventListener("click", e => copyLines(rcPathLines(rcRows), e.target));
+}
+
+function renderByType() {
+  if (!RC_SUMMARY) return;
+  const drive = $("rc-type-drive").value;
+  const rows = drive ? (RC_SUMMARY.bytype.drives[drive] || []) : RC_SUMMARY.bytype.total;
+  const max = rows.length ? rows[0].bytes : 1;
+  $("rc-bytype").innerHTML = rows.length ? rows.map(r => `
+    <div class="rc-bar">
+      <span class="rc-bar-name">${esc(r.label)}</span>
+      <span class="rc-bar-track"><i style="width:${(r.bytes / max * 100).toFixed(1)}%"></i></span>
+      <span class="rc-bar-val">${esc(r.bytes_human)} · ${r.files.toLocaleString()} ไฟล์</span>
+    </div>`).join("") : `<div class="hint" style="padding:12px 0">ไม่มีข้อมูล</div>`;
+}
+
+$("rc-mode-file").addEventListener("click", () => {
+  rcMode = "file";
+  $("rc-mode-file").classList.add("on"); $("rc-mode-folder").classList.remove("on");
+  loadBigOld();
+});
+$("rc-mode-folder").addEventListener("click", () => {
+  rcMode = "folder";
+  $("rc-mode-folder").classList.add("on"); $("rc-mode-file").classList.remove("on");
+  loadBigOld();
+});
+["rc-gb", "rc-years", "rc-drive"].forEach(id =>
+  $(id).addEventListener("change", loadBigOld));
+$("rc-type-drive").addEventListener("change", renderByType);
+
+/* first visit to the tab does the work - not on every page load */
+let reclaimLoaded = false;
+function ensureReclaimLoaded() {
+  if (reclaimLoaded) return;
+  reclaimLoaded = true;
+  loadReclaimSummary();
+  loadBigOld();
+}
+
 /* ---------- dedup ---------- */
+
 $("dedup-btn").addEventListener("click", async () => {
   const box = $("dedup-progress");
   box.className = "progress-box show";
@@ -2399,6 +3026,63 @@ def cmd_serve(args):
                          "size_human": human_size(r[2]),
                          "mdate": time.strftime("%Y-%m-%d", time.localtime(r[3]))}
                         for r in rows[:500]]})
+                elif route == "/api/reclaim/summary":
+                    conn = get_conn(db_path)
+                    payload = {"ok": True,
+                               "junk": reclaim_junk_summary(conn),
+                               "bytype": reclaim_by_type(conn),
+                               "bad_mtime": reclaim_bad_mtime(conn)}
+                    conn.close()
+                    self._json(payload)
+                elif route == "/api/reclaim/junk":
+                    conn = get_conn(db_path)
+                    rows = reclaim_junk_files(conn, q.get("rule", [""])[0],
+                                              limit=int(q.get("limit", ["500"])[0]))
+                    conn.close()
+                    if rows is None:
+                        self._json({"ok": False, "error": "ไม่รู้จักกฎนี้"}, 400)
+                    else:
+                        self._json({"ok": True, "rows": rows})
+                elif route == "/api/reclaim/bigold":
+                    conn = get_conn(db_path)
+                    min_bytes = int(float(q.get("gb", ["1"])[0]) * 1024 ** 3)
+                    years = float(q.get("years", ["3"])[0])
+                    drive = q.get("drive", [""])[0] or None
+                    mode = q.get("mode", ["file"])[0]
+                    rows = reclaim_mark_duplicates(conn, reclaim_bigold(
+                        conn, min_bytes, years, drive=drive, mode=mode,
+                        limit=int(q.get("limit", ["200"])[0])))
+                    total = reclaim_bigold_total(conn, min_bytes, years, drive=drive, mode=mode)
+                    conn.close()
+                    self._json({"ok": True, "rows": rows, "total": total})
+                elif route == "/api/reclaim/export":
+                    conn = get_conn(db_path)
+                    if q.get("kind", ["bigold"])[0] == "junk":
+                        rule_id = q.get("rule", [""])[0]
+                        rule = _RULES_BY_ID.get(rule_id)
+                        rows = reclaim_junk_files(conn, rule_id, limit=5000) or []
+                        title = "ของที่ลบได้ — " + (rule["label"] if rule else "junk")
+                        note = rule["note"] if rule else ""
+                    else:
+                        rows = reclaim_mark_duplicates(conn, reclaim_bigold(
+                            conn,
+                            int(float(q.get("gb", ["1"])[0]) * 1024 ** 3),
+                            float(q.get("years", ["3"])[0]),
+                            drive=q.get("drive", [""])[0] or None,
+                            mode=q.get("mode", ["file"])[0],
+                            limit=int(q.get("limit", ["1000"])[0])))
+                        title = "ใหญ่และไม่ได้แตะมานาน"
+                        note = ("ตรวจก่อนลบทุกครั้ง - รายการนี้ดูจากข้อมูลใน catalog "
+                                "ไม่ได้เปิดอ่านไฟล์จริง")
+                    conn.close()
+                    data = reclaim_markdown(title, rows, note).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                    self.send_header("Content-Disposition",
+                                     'attachment; filename="hddcat-reclaim.md"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
                 elif route == "/api/files":
                     drive = q.get("drive", [""])[0]
                     folder = q.get("folder", [""])[0]
@@ -2612,6 +3296,19 @@ def main():
     sp.add_argument("--limit", type=int, default=100,
                      help="จำนวนกลุ่มสูงสุดที่แสดง (default 100)")
     sp.set_defaults(func=cmd_dedup)
+
+    sp = sub.add_parser("reclaim",
+                         help="หาของที่ลบ/ย้ายได้เพื่อคืนพื้นที่ (อ่านอย่างเดียว ไม่ลบให้)")
+    sp.add_argument("--junk", action="store_true", help="สรุป cache/ไฟล์ขยะที่ลบได้ (ค่าเริ่มต้น)")
+    sp.add_argument("--big-old", action="store_true", help="ไฟล์ใหญ่ที่ไม่ถูกแตะมานาน")
+    sp.add_argument("--by-type", action="store_true", help="พื้นที่หายไปกับไฟล์ชนิดไหน")
+    sp.add_argument("--folders", action="store_true",
+                     help="(--big-old) สรุปเป็นโฟลเดอร์งานแทนไฟล์เดี่ยว")
+    sp.add_argument("--min-gb", type=float, default=1.0, help="(--big-old) ขนาดขั้นต่ำ GB")
+    sp.add_argument("--years", type=float, default=3.0, help="(--big-old) ไม่ถูกแตะกี่ปี")
+    sp.add_argument("--limit", type=int, default=100)
+    sp.add_argument("--md", help="(--big-old) เขียน checklist Markdown ออกไฟล์")
+    sp.set_defaults(func=cmd_reclaim)
 
     sp = sub.add_parser("forget", help="ลบ drive ออกจาก catalog (ลบแค่ข้อมูลใน DB ไม่แตะไฟล์จริง)")
     sp.add_argument("label")
