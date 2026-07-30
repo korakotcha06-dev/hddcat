@@ -663,6 +663,306 @@ def cmd_dedup(args):
         print(f"(แสดง {len(groups)} กลุ่มแรกจาก {ngroups} กลุ่ม - เรียงตามพื้นที่ที่คืนได้)")
 
 
+# =============================== reclaim space ===============================
+# "อะไรลบ/ย้ายได้บ้าง" - answered from catalog metadata only: no drive needs to be
+# plugged in, no file is ever read, and nothing here deletes anything. Every code
+# path below is read-only by construction; the UI hands the user a list.
+
+# Anything outside this window is a broken timestamp, not an old file. Real
+# catalogs contain files dated 2262 and 1904 (copies, bad cameras, filesystem
+# quirks) - scoring by age without this guard puts garbage at the top.
+MTIME_FLOOR = 946684800.0          # 2000-01-01
+YEAR_SECONDS = 365 * 86400
+
+# Junk rules. `where` is a fixed SQL fragment (never user input). tier "safe" =
+# the app that made it can regenerate it; tier "review" = looks like junk but
+# losing it costs something (Auto-Save is a project backup, a proxy may still be
+# linked in an open timeline).
+# NOTE: .DS_Store / Thumbs.db / desktop.ini can never show up here - SKIP_FILES
+# drops them at scan time, so the catalog has no record of them at all.
+RECLAIM_RULES = [
+    {"id": "premiere_previews", "tier": "safe",
+     "label": "Premiere Video/Audio Previews",
+     "note": "ไฟล์พรีวิวที่ Premiere สร้างใหม่ได้เอง",
+     "where": "relpath LIKE '%Adobe Premiere Pro Video Previews%' "
+              "OR relpath LIKE '%Adobe Premiere Pro Audio Previews%'"},
+    {"id": "premiere_cache", "tier": "safe",
+     "label": "Premiere peak/conform (.pek/.cfa)",
+     "note": "ไฟล์ waveform/conform สร้างใหม่อัตโนมัติเมื่อเปิดงาน",
+     "where": "ext IN ('.pek', '.cfa')"},
+    {"id": "lightroom_previews", "tier": "safe",
+     "label": "Lightroom previews",
+     "note": "พรีวิวของ Lightroom สร้างใหม่ได้จากไฟล์ต้นฉบับ",
+     "where": "ext = '.lrprev' OR relpath LIKE '%Previews.lrdata%'"},
+    {"id": "resolve_cache", "tier": "safe",
+     "label": "DaVinci Resolve cache / ProxyMedia",
+     "note": "cache ที่ Resolve สร้างใหม่ได้",
+     "where": "relpath LIKE '%CacheClip%' OR relpath LIKE '%ProxyMedia%'"},
+    {"id": "fcp_render", "tier": "safe",
+     "label": "Final Cut render / transcoded media",
+     "note": "ไฟล์ render ของ Final Cut สร้างใหม่ได้",
+     "where": "relpath LIKE '%Render Files%' OR relpath LIKE '%Transcoded Media%'"},
+    {"id": "appledouble", "tier": "safe",
+     "label": "AppleDouble (ไฟล์ ._)",
+     "note": "เศษ metadata ที่ macOS ทิ้งไว้บนไดรฟ์ exFAT/FAT",
+     "where": "filename LIKE '._%'"},
+    {"id": "temp", "tier": "safe",
+     "label": "ไฟล์ชั่วคราว (.tmp/.temp/.bak)",
+     "note": "ของค้างจากโปรแกรมที่ปิดไม่สมบูรณ์",
+     "where": "ext IN ('.tmp', '.temp', '.bak')"},
+    {"id": "premiere_autosave", "tier": "review",
+     "label": "Premiere Auto-Save",
+     "note": "เป็นไฟล์โปรเจกต์สำรอง - ลบแล้วกู้งานย้อนหลังไม่ได้ ดูก่อนลบ",
+     "where": "relpath LIKE '%Auto-Save%'"},
+    {"id": "proxy", "tier": "review",
+     "label": "โฟลเดอร์ proxy",
+     "note": "ถ้ายังตัดงานนั้นอยู่ proxy อาจถูกลิงก์ในไทม์ไลน์ ดูก่อนลบ",
+     "where": "relpath LIKE '%/Proxy/%' OR relpath LIKE '%/Proxies/%' "
+              "OR relpath LIKE 'Proxy/%' OR relpath LIKE 'Proxies/%'"},
+]
+_RULES_BY_ID = {r["id"]: r for r in RECLAIM_RULES}
+
+# ext -> bucket for the "พื้นที่หายไปไหน" rollup. Anything unlisted lands in "อื่นๆ".
+RECLAIM_TYPES = [
+    ("วิดีโอ", ['.mp4', '.mov', '.r3d', '.braw', '.mxf', '.avi', '.mts', '.m2ts',
+                '.m4v', '.insv', '.mkv', '.wmv', '.lrf']),
+    ("ภาพ RAW", ['.cr3', '.cr2', '.nef', '.dng', '.arw', '.raf', '.orf', '.rw2', '.srw']),
+    ("ภาพ", ['.jpg', '.jpeg', '.png', '.heic', '.tif', '.tiff', '.webp', '.psd',
+             '.psb', '.gif']),
+    ("เสียง", ['.wav', '.mp3', '.aif', '.aiff', '.m4a', '.flac', '.aac']),
+    ("ไฟล์งาน/โปรเจกต์", ['.prproj', '.aep', '.drp', '.skp', '.dwg', '.indd', '.ai',
+                          '.fcpxml', '.edl', '.aaf']),
+    ("บีบอัด/อิมเมจ", ['.zip', '.rar', '.7z', '.dmg', '.iso', '.tar', '.gz']),
+    ("เอกสาร", ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv']),
+    ("cache/ชั่วคราว", ['.pek', '.cfa', '.lrprev', '.tmp', '.temp', '.bak', '.thm']),
+]
+
+_RECLAIM_CACHE = {}
+_RECLAIM_CACHE_LOCK = threading.Lock()
+
+
+def _reclaim_cache_key(conn):
+    """Anything that changes the answer (a scan, a forget) moves last_scanned or
+    the drive count, so this is enough to invalidate by itself."""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(last_scanned), 0), COUNT(*) FROM drives").fetchone()
+    return "%s:%s" % (row[0], row[1])
+
+
+def _cached(conn, name, build):
+    key = _reclaim_cache_key(conn) + "|" + name
+    with _RECLAIM_CACHE_LOCK:
+        if key in _RECLAIM_CACHE:
+            return _RECLAIM_CACHE[key]
+    value = build()
+    with _RECLAIM_CACHE_LOCK:
+        for stale in [k for k in _RECLAIM_CACHE if not k.startswith(key.split("|")[0])]:
+            del _RECLAIM_CACHE[stale]     # drop everything from an older catalog state
+        _RECLAIM_CACHE[key] = value
+    return value
+
+
+def _safe_date(mtime):
+    """Formatted date, or None when the timestamp is impossible (see MTIME_FLOOR)."""
+    if mtime is None or mtime < MTIME_FLOOR or mtime > time.time() + 86400:
+        return None
+    return time.strftime("%Y-%m-%d", time.localtime(mtime))
+
+
+def reclaim_junk_summary(conn):
+    """Per-rule file count + bytes. Measured on a 2M-row catalog: running the
+    rules one at a time takes ~3.7s, folding them into a single pass with CASE
+    WHEN takes ~5.7s - some rules ride the filename index, and one pass forces
+    every predicate onto every row. So: one query per rule, and cache it."""
+    def build():
+        out = []
+        for rule in RECLAIM_RULES:
+            n, b = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE " + rule["where"]
+            ).fetchone()
+            out.append({"id": rule["id"], "label": rule["label"], "tier": rule["tier"],
+                        "note": rule["note"], "files": n, "bytes": b,
+                        "bytes_human": human_size(b)})
+        return out
+    return _cached(conn, "junk", build)
+
+
+def reclaim_junk_files(conn, rule_id, limit=500):
+    rule = _RULES_BY_ID.get(rule_id)
+    if rule is None:
+        return None
+    rows = conn.execute(
+        "SELECT drive_label, relpath, size, mtime FROM files WHERE " + rule["where"] +
+        " ORDER BY size DESC LIMIT ?", (limit,)).fetchall()
+    return [{"drive": d, "path": p, "files": 1, "size": s,
+             "size_human": human_size(s), "mdate": _safe_date(mt)}
+            for d, p, s, mt in rows]
+
+
+def reclaim_bigold(conn, min_bytes, years, drive=None, mode="file", limit=200):
+    """Big files (or job folders) nobody has touched in a long time, ranked by how
+    much space deleting them would actually return. Files with a broken mtime are
+    excluded and reported separately - see reclaim_bad_mtime()."""
+    now = time.time()
+    cutoff = now - years * YEAR_SECONDS
+    where_drive = " AND drive_label = ?" if drive else ""
+
+    if mode == "folder":
+        args = [MTIME_FLOOR, now + 86400, cutoff]
+        if drive:
+            args.append(drive)
+        rows = conn.execute(
+            "SELECT drive_label, depth1, COUNT(*), SUM(size), MAX(mtime) FROM files "
+            "WHERE mtime BETWEEN ? AND ? AND mtime < ?" + where_drive +
+            " GROUP BY drive_label, depth1 HAVING SUM(size) >= ? "
+            "ORDER BY SUM(size) DESC LIMIT ?", args + [min_bytes, limit]).fetchall()
+        return [{"drive": d, "path": f or "(root)", "files": n, "size": b,
+                 "size_human": human_size(b), "mdate": _safe_date(newest),
+                 "years": round((now - newest) / YEAR_SECONDS, 1)}
+                for d, f, n, b, newest in rows]
+
+    args = [MTIME_FLOOR, now + 86400, cutoff, min_bytes]
+    if drive:
+        args.append(drive)
+    args += [now, float(YEAR_SECONDS), limit]
+    rows = conn.execute(
+        "SELECT drive_label, relpath, size, mtime FROM files "
+        "WHERE mtime BETWEEN ? AND ? AND mtime < ? AND size >= ?" + where_drive +
+        " ORDER BY size * (1.0 + (? - mtime) / ?) DESC LIMIT ?", args).fetchall()
+    return [{"drive": d, "path": p, "files": 1, "size": s, "size_human": human_size(s),
+             "mdate": _safe_date(mt), "years": round((now - mt) / YEAR_SECONDS, 1)}
+            for d, p, s, mt in rows]
+
+
+def reclaim_mark_duplicates(conn, rows):
+    """Flag rows that have a same-name same-size copy on another drive - those are
+    the safest ones to delete first. Same caveat as the duplicates section: this
+    compares filename + size, never contents, so it means 'almost certainly the
+    same file', not 'proven identical'."""
+    for r in rows:
+        if r.get("files", 1) != 1:
+            continue
+        n = conn.execute(
+            "SELECT COUNT(DISTINCT drive_label) FROM files WHERE filename = ? AND size = ?",
+            (os.path.basename(r["path"]), r["size"])).fetchone()[0]
+        r["copies_elsewhere"] = max(0, n - 1)
+    return rows
+
+
+def reclaim_by_type(conn):
+    """Where the space actually went, per drive and overall."""
+    def build():
+        bucket_of = {}
+        for label, exts in RECLAIM_TYPES:
+            for e in exts:
+                bucket_of[e] = label
+        per_drive, totals = {}, {}
+        for drive, ext, n, b in conn.execute(
+                "SELECT drive_label, ext, COUNT(*), SUM(size) FROM files "
+                "GROUP BY drive_label, ext"):
+            label = bucket_of.get((ext or "").lower(), "อื่นๆ")
+            cur = per_drive.setdefault(drive, {}).setdefault(label, [0, 0])
+            cur[0] += n
+            cur[1] += b or 0
+            t = totals.setdefault(label, [0, 0])
+            t[0] += n
+            t[1] += b or 0
+
+        def pack(d):
+            out = [{"label": k, "files": v[0], "bytes": v[1], "bytes_human": human_size(v[1])}
+                   for k, v in d.items()]
+            out.sort(key=lambda x: -x["bytes"])
+            return out
+
+        return {"total": pack(totals), "drives": {k: pack(v) for k, v in per_drive.items()}}
+    return _cached(conn, "bytype", build)
+
+
+def reclaim_bad_mtime(conn):
+    """Files whose timestamp is impossible - they can't be judged by age, so they
+    get their own bucket instead of silently skewing the rankings."""
+    def build():
+        n, b = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE mtime < ? OR mtime > ?",
+            (MTIME_FLOOR, time.time() + 86400)).fetchone()
+        return {"files": n, "bytes": b, "bytes_human": human_size(b)}
+    return _cached(conn, "badmtime", build)
+
+
+def reclaim_markdown(title, rows, note=""):
+    """Markdown checklist - tick items off while deleting by hand, and it drops
+    straight into Obsidian next to the export-obsidian notes."""
+    total = sum(r.get("size", 0) for r in rows)
+    lines = ["# " + title, ""]
+    if note:
+        lines += ["> " + note, ""]
+    lines += ["สร้างโดย HDDCAT %s · %s" % (__version__, time.strftime("%Y-%m-%d %H:%M")), "",
+              "รวม %s รายการ · คืนพื้นที่ได้ ~%s" % (format(len(rows), ","), human_size(total)), ""]
+    by_drive = {}
+    for r in rows:
+        by_drive.setdefault(r["drive"], []).append(r)
+    for drive in sorted(by_drive):
+        items = by_drive[drive]
+        lines += ["## %s — %s" % (drive, human_size(sum(i.get("size", 0) for i in items))), ""]
+        for r in items:
+            extra = []
+            if r.get("mdate"):
+                extra.append("แก้ไขล่าสุด " + r["mdate"])
+            if r.get("files", 1) > 1:
+                extra.append("%s ไฟล์" % format(r["files"], ","))
+            if r.get("copies_elsewhere"):
+                extra.append("มีสำเนาอีก %d ไดรฟ์" % r["copies_elsewhere"])
+            suffix = ("  _(%s)_" % " · ".join(extra)) if extra else ""
+            lines.append("- [ ] `%s` — **%s**%s" % (r["path"], r["size_human"], suffix))
+        lines.append("")
+    lines += ["---", "path เป็นตำแหน่งภายในไดรฟ์นั้น · HDDCAT ไม่ลบไฟล์ให้ "
+              "รายการนี้ไว้ตรวจแล้วลบเอง"]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_reclaim(args):
+    conn = get_conn(args.db)
+    if args.junk or not (args.big_old or args.by_type):
+        print("=== ของที่ลบได้ (cache/ไฟล์ขยะ) ===")
+        total = 0
+        for r in reclaim_junk_summary(conn):
+            if not r["files"]:
+                continue
+            total += r["bytes"]
+            tier = "ลบได้" if r["tier"] == "safe" else "ดูก่อน"
+            print("  [%s] %-38s %8s ไฟล์  %9s"
+                  % (tier, r["label"], format(r["files"], ","), r["bytes_human"]))
+        print("  รวมคืนได้ ~%s\n" % human_size(total))
+    if args.big_old:
+        rows = reclaim_mark_duplicates(conn, reclaim_bigold(
+            conn, int(args.min_gb * 1024 ** 3), args.years,
+            mode="folder" if args.folders else "file", limit=args.limit))
+        kind = "โฟลเดอร์" if args.folders else "ไฟล์"
+        print("=== %sใหญ่ที่ไม่ถูกแตะเกิน %s ปี (>= %sGB) ==="
+              % (kind, args.years, args.min_gb))
+        for r in rows:
+            dup = ("  [มีสำเนาอีก %d ไดรฟ์]" % r["copies_elsewhere"]) if r.get("copies_elsewhere") else ""
+            print("  [%s] %s  %s (ล่าสุด %s)%s"
+                  % (r["drive"], r["path"], r["size_human"], r["mdate"] or "?", dup))
+        print("  รวม %d รายการ ~%s\n" % (len(rows), human_size(sum(r["size"] for r in rows))))
+        if args.md:
+            with open(args.md, "w", encoding="utf-8") as f:
+                f.write(reclaim_markdown("%sใหญ่ที่ไม่ถูกแตะเกิน %s ปี" % (kind, args.years), rows))
+            print("  เขียน checklist ไปที่ %s" % args.md)
+    if args.by_type:
+        print("=== พื้นที่หายไปไหน ===")
+        for r in reclaim_by_type(conn)["total"]:
+            print("  %-22s %9s ไฟล์  %9s"
+                  % (r["label"], format(r["files"], ","), r["bytes_human"]))
+        print()
+    bad = reclaim_bad_mtime(conn)
+    if bad["files"]:
+        print("หมายเหตุ: มี %s ไฟล์ (%s) ที่วันที่แก้ไขเชื่อไม่ได้ (อนาคต/ก่อนปี 2000) "
+              "- ไม่ถูกนับในรายการ 'ไม่ถูกแตะนาน'"
+              % (format(bad["files"], ","), bad["bytes_human"]))
+    conn.close()
+
+
 def cmd_forget(args):
     conn = get_conn(args.db)
     if not args.yes:
@@ -2399,6 +2699,62 @@ def cmd_serve(args):
                          "size_human": human_size(r[2]),
                          "mdate": time.strftime("%Y-%m-%d", time.localtime(r[3]))}
                         for r in rows[:500]]})
+                elif route == "/api/reclaim/summary":
+                    conn = get_conn(db_path)
+                    payload = {"ok": True,
+                               "junk": reclaim_junk_summary(conn),
+                               "bytype": reclaim_by_type(conn),
+                               "bad_mtime": reclaim_bad_mtime(conn)}
+                    conn.close()
+                    self._json(payload)
+                elif route == "/api/reclaim/junk":
+                    conn = get_conn(db_path)
+                    rows = reclaim_junk_files(conn, q.get("rule", [""])[0],
+                                              limit=int(q.get("limit", ["500"])[0]))
+                    conn.close()
+                    if rows is None:
+                        self._json({"ok": False, "error": "ไม่รู้จักกฎนี้"}, 400)
+                    else:
+                        self._json({"ok": True, "rows": rows})
+                elif route == "/api/reclaim/bigold":
+                    conn = get_conn(db_path)
+                    rows = reclaim_mark_duplicates(conn, reclaim_bigold(
+                        conn,
+                        int(float(q.get("gb", ["1"])[0]) * 1024 ** 3),
+                        float(q.get("years", ["3"])[0]),
+                        drive=q.get("drive", [""])[0] or None,
+                        mode=q.get("mode", ["file"])[0],
+                        limit=int(q.get("limit", ["200"])[0])))
+                    conn.close()
+                    self._json({"ok": True, "rows": rows})
+                elif route == "/api/reclaim/export":
+                    conn = get_conn(db_path)
+                    if q.get("kind", ["bigold"])[0] == "junk":
+                        rule_id = q.get("rule", [""])[0]
+                        rule = _RULES_BY_ID.get(rule_id)
+                        rows = reclaim_junk_files(conn, rule_id, limit=5000) or []
+                        title = "ของที่ลบได้ — " + (rule["label"] if rule else "junk")
+                        note = rule["note"] if rule else ""
+                    else:
+                        rows = reclaim_mark_duplicates(conn, reclaim_bigold(
+                            conn,
+                            int(float(q.get("gb", ["1"])[0]) * 1024 ** 3),
+                            float(q.get("years", ["3"])[0]),
+                            drive=q.get("drive", [""])[0] or None,
+                            mode=q.get("mode", ["file"])[0],
+                            limit=int(q.get("limit", ["1000"])[0])))
+                        title = "ใหญ่และไม่ได้แตะมานาน"
+                        note = ("ตรวจก่อนลบทุกครั้ง - รายการนี้ดูจากข้อมูลใน catalog "
+                                "ไม่ได้เปิดอ่านไฟล์จริง")
+                    conn.close()
+                    data = reclaim_markdown(title, rows, note).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                    self.send_header("Content-Disposition",
+                                     'attachment; filename="hddcat-reclaim.md"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
                 elif route == "/api/files":
                     drive = q.get("drive", [""])[0]
                     folder = q.get("folder", [""])[0]
@@ -2612,6 +2968,19 @@ def main():
     sp.add_argument("--limit", type=int, default=100,
                      help="จำนวนกลุ่มสูงสุดที่แสดง (default 100)")
     sp.set_defaults(func=cmd_dedup)
+
+    sp = sub.add_parser("reclaim",
+                         help="หาของที่ลบ/ย้ายได้เพื่อคืนพื้นที่ (อ่านอย่างเดียว ไม่ลบให้)")
+    sp.add_argument("--junk", action="store_true", help="สรุป cache/ไฟล์ขยะที่ลบได้ (ค่าเริ่มต้น)")
+    sp.add_argument("--big-old", action="store_true", help="ไฟล์ใหญ่ที่ไม่ถูกแตะมานาน")
+    sp.add_argument("--by-type", action="store_true", help="พื้นที่หายไปกับไฟล์ชนิดไหน")
+    sp.add_argument("--folders", action="store_true",
+                     help="(--big-old) สรุปเป็นโฟลเดอร์งานแทนไฟล์เดี่ยว")
+    sp.add_argument("--min-gb", type=float, default=1.0, help="(--big-old) ขนาดขั้นต่ำ GB")
+    sp.add_argument("--years", type=float, default=3.0, help="(--big-old) ไม่ถูกแตะกี่ปี")
+    sp.add_argument("--limit", type=int, default=100)
+    sp.add_argument("--md", help="(--big-old) เขียน checklist Markdown ออกไฟล์")
+    sp.set_defaults(func=cmd_reclaim)
 
     sp = sub.add_parser("forget", help="ลบ drive ออกจาก catalog (ลบแค่ข้อมูลใน DB ไม่แตะไฟล์จริง)")
     sp.add_argument("label")
