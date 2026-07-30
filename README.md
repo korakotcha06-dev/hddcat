@@ -17,11 +17,13 @@ Photographers and video editors end up with a mountain of external HDDs — and 
 - Smart library: auto-groups client / job / date (CE + BE calendars)
 - Cross-drive duplicate finder (name+size, read-only)
 - Plug-in detection: pops "scan now?" when a drive mounts
-- Self-updating .app, local web UI, zero telemetry (one version-check ping, can be disabled)
+- Self-updating .app, native window, zero telemetry (one version-check ping, can be disabled)
 
 ## The whole app is ONE file
 
-`catalog.py` — Python stdlib only. No pip installs, no node_modules, no build step. The web UI is vanilla HTML/CSS/JS embedded in the same file. This is a feature, not an accident (see Contributing).
+`catalog.py` — Python stdlib only. No pip installs, no node_modules, no build step. The UI is vanilla HTML/CSS/JS embedded in the same file. This is a feature, not an accident (see Contributing).
+
+The one exception is `shell/HDDCATShell.swift` (~350 lines, AppKit + WebKit): the native macOS window that `HDDCAT.app` opens, so the UI renders in its own window with its own Dock icon instead of a browser tab. It only starts `catalog.py serve --no-browser` and points a WKWebView at it — no app logic lives there. `build-dist` compiles it when Xcode Command Line Tools are present and falls back to the old browser launcher when they aren't, so `catalog.py` alone still is the whole program.
 
 ## Run from source
 
