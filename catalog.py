@@ -31,7 +31,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 
 import argparse
 import json
@@ -39,6 +39,7 @@ import os
 import re
 import sqlite3
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -691,7 +692,8 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
    > เลื่อนลงล่างสุด จะเห็นข้อความว่า HDDCAT ถูกบล็อก ให้กด "Open Anyway" แล้วยืนยันอีกครั้ง —
    > ทำครั้งแรกครั้งเดียวเช่นกัน
 
-3. เบราว์เซอร์จะเปิด HDDCAT ขึ้นมาเอง — จะปิดโปรแกรมเมื่อไหร่ คลิกขวาที่ไอคอนแมวใน Dock แล้วเลือก Quit
+3. HDDCAT เปิดเป็นหน้าต่างของตัวเอง (ไม่ใช้เบราว์เซอร์แล้วตั้งแต่ v1.2.0) — ปิดโปรแกรมด้วย ⌘Q
+   หรือคลิกขวาที่ไอคอนแมวใน Dock แล้วเลือก Quit
 
 > ครั้งแรก ถ้าเครื่องยังไม่มี python3 ระบบจะเด้งหน้าต่างชวนติดตั้ง
 > "Command Line Developer Tools" — กด Install รอสักครู่ แล้วเปิดใหม่อีกครั้ง
@@ -765,9 +767,11 @@ _DIST_INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 """
 
-# HDDCAT.app/Contents/MacOS/HDDCAT - the app bundle's actual executable. Keeps
-# all user data under ~/HDDCAT (not wherever the .app happens to be dragged
-# to - Applications/ is typically not user-writable).
+# Fallback executable, used only when the native shell can't be compiled (no
+# Xcode Command Line Tools). Opens the web UI in the user's default browser -
+# what every release before 1.2.0 did. Keeps all user data under ~/HDDCAT (not
+# wherever the .app happens to be dragged to - /Applications is typically not
+# user-writable).
 _DIST_APP_LAUNCHER = (
     '#!/bin/bash\n'
     'BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"\n'
@@ -777,17 +781,42 @@ _DIST_APP_LAUNCHER = (
 )
 
 
+def _build_app_shell(root):
+    """Compile shell/HDDCATShell.swift - the native window HDDCAT.app opens.
+    Returns its bytes, or None when the machine can't build it (no Command Line
+    Tools), in which case the caller falls back to the old browser launcher."""
+    script = os.path.join(root, "shell", "build-shell.sh")
+    if not os.path.isfile(script):
+        print("WARN: ไม่พบ shell/build-shell.sh - จะใช้ launcher แบบเปิดเบราว์เซอร์แทน")
+        return None
+    if shutil.which("swiftc") is None and subprocess.call(
+            ["xcrun", "-f", "swiftc"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL) != 0:
+        print("WARN: ไม่พบ swiftc (ต้องมี Xcode Command Line Tools) - "
+              "จะใช้ launcher แบบเปิดเบราว์เซอร์แทน")
+        return None
+    print("กำลัง build native shell (shell/build-shell.sh)…")
+    if subprocess.call(["/bin/bash", script]) != 0:
+        print("WARN: build shell ไม่ผ่าน - จะใช้ launcher แบบเปิดเบราว์เซอร์แทน")
+        return None
+    binary = os.path.join(root, "shell", "build", "HDDCAT")
+    if not os.path.isfile(binary):
+        print("WARN: build shell ไม่ได้ไฟล์ผลลัพธ์ - จะใช้ launcher แบบเปิดเบราว์เซอร์แทน")
+        return None
+    with open(binary, "rb") as f:
+        return f.read()
+
+
 def cmd_build_dist(args):
     """Build dist/HDDCAT.zip - a self-contained HDDCAT/ folder with a real,
     double-clickable HDDCAT.app (cat icon, shows in the Dock) plus a plain
     catalog.py copy for Terminal users, README and LICENSE. Never bundles
-    catalog.db - that's per-machine/private. DOES bundle exactly 3 public
-    marketing images (hero.jpg, shelf.jpg, founder.jpg - already public on
-    the live site/landing page) into Contents/Resources/assets/ so the
-    Home tab's web UI has something to serve via GET /assets/<name> when
-    running from inside the .app (assets_dir there resolves next to
-    __file__, i.e. Contents/Resources/assets). No other file from assets/
-    is bundled."""
+    catalog.db - that's per-machine/private.
+
+    Since 1.2.0 the .app's executable is the compiled Swift shell, which opens
+    the UI in its own window instead of the user's browser. If that can't be
+    compiled here the zip falls back to the old bash launcher, which still
+    works - it just opens a browser tab."""
     root = os.path.dirname(os.path.abspath(__file__))
     dist_dir = os.path.join(root, "dist")
     os.makedirs(dist_dir, exist_ok=True)
@@ -802,18 +831,48 @@ def cmd_build_dist(args):
     with open(icns_path, "rb") as f:
         icns_bytes = f.read()
 
-    bundled_images = ["hero.jpg", "shelf.jpg", "founder.jpg"]
-    image_paths = {}
-    for img in bundled_images:
-        p = os.path.join(root, "assets", img)
-        if not os.path.isfile(p):
-            print(f"ERROR: ไม่พบรูป {p}")
-            print("ต้องมี hero.jpg, shelf.jpg, founder.jpg ใน assets/ ก่อนรัน build-dist "
-                  "(ใช้สำหรับ Home tab ของ .app)")
-            sys.exit(1)
-        image_paths[img] = p
+    shell_bytes = _build_app_shell(root)
 
     plist = _DIST_INFO_PLIST.format(version=__version__)
+
+    # The .app is assembled on disk first so codesign can sign it as a real
+    # bundle. Signing only the executable leaves the bundle half-signed, which
+    # macOS reports as "app is damaged" instead of the normal unidentified-
+    # developer prompt.
+    staging = tempfile.mkdtemp(prefix="hddcat-app-")
+    app_dir = os.path.join(staging, "HDDCAT.app")
+    macos_dir = os.path.join(app_dir, "Contents", "MacOS")
+    res_dir = os.path.join(app_dir, "Contents", "Resources")
+    os.makedirs(macos_dir)
+    os.makedirs(res_dir)
+    with open(os.path.join(app_dir, "Contents", "Info.plist"), "w", encoding="utf-8") as f:
+        f.write(plist)
+    exe_path = os.path.join(macos_dir, "HDDCAT")
+    if shell_bytes:
+        with open(exe_path, "wb") as f:
+            f.write(shell_bytes)
+    else:
+        with open(exe_path, "w", encoding="utf-8") as f:
+            f.write(_DIST_APP_LAUNCHER)
+    os.chmod(exe_path, 0o755)
+    with open(os.path.join(res_dir, "HDDCAT.icns"), "wb") as f:
+        f.write(icns_bytes)
+    shutil.copyfile(os.path.abspath(__file__), os.path.join(res_dir, "catalog.py"))
+    # (1.2.0: no assets/ any more - the Home tab is a dashboard now, not a
+    # landing page, so the 3 marketing photos it used to show are gone. The
+    # GET /assets/<name> route stays for anyone theming their own copy.)
+
+    signed = False
+    if shell_bytes:
+        # ad-hoc ("-") signature: free, no Apple Developer ID, and enough for
+        # macOS on Apple Silicon to execute the binary at all
+        if subprocess.call(["codesign", "--force", "--deep", "--sign", "-", app_dir],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0 and \
+           subprocess.call(["codesign", "--verify", "--deep", "--strict", app_dir],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            signed = True
+        else:
+            print("WARN: เซ็น .app (ad-hoc) ไม่สำเร็จ - แอปอาจเปิดไม่ได้บนเครื่อง Apple Silicon")
 
     entries = []
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -821,35 +880,19 @@ def cmd_build_dist(args):
         zf.write(os.path.abspath(__file__), "HDDCAT/catalog.py")
         entries.append("HDDCAT/catalog.py")
 
-        # HDDCAT.app/Contents/Info.plist
-        zi = zipfile.ZipInfo("HDDCAT/HDDCAT.app/Contents/Info.plist", date_time=now)
-        zi.compress_type = zipfile.ZIP_DEFLATED
-        zf.writestr(zi, plist)
-        entries.append("HDDCAT/HDDCAT.app/Contents/Info.plist")
-
-        # HDDCAT.app/Contents/MacOS/HDDCAT (the executable - exec bit set)
-        zi = zipfile.ZipInfo("HDDCAT/HDDCAT.app/Contents/MacOS/HDDCAT", date_time=now)
-        zi.compress_type = zipfile.ZIP_DEFLATED
-        zi.external_attr = 0o755 << 16
-        zf.writestr(zi, _DIST_APP_LAUNCHER)
-        entries.append("HDDCAT/HDDCAT.app/Contents/MacOS/HDDCAT")
-
-        # HDDCAT.app/Contents/Resources/HDDCAT.icns
-        zi = zipfile.ZipInfo("HDDCAT/HDDCAT.app/Contents/Resources/HDDCAT.icns", date_time=now)
-        zi.compress_type = zipfile.ZIP_DEFLATED
-        zf.writestr(zi, icns_bytes)
-        entries.append("HDDCAT/HDDCAT.app/Contents/Resources/HDDCAT.icns")
-
-        # HDDCAT.app/Contents/Resources/catalog.py (what the launcher actually runs)
-        zf.write(os.path.abspath(__file__), "HDDCAT/HDDCAT.app/Contents/Resources/catalog.py")
-        entries.append("HDDCAT/HDDCAT.app/Contents/Resources/catalog.py")
-
-        # HDDCAT.app/Contents/Resources/assets/ - the 3 public marketing images only,
-        # so the Home tab's hero/story-strip/founder images don't 404 inside the .app
-        for img in bundled_images:
-            dest = f"HDDCAT/HDDCAT.app/Contents/Resources/assets/{img}"
-            zf.write(image_paths[img], dest)
-            entries.append(dest)
+        # the assembled (and signed) bundle, permissions preserved
+        for dirpath, _dirnames, filenames in os.walk(app_dir):
+            for name in sorted(filenames):
+                full = os.path.join(dirpath, name)
+                rel = os.path.relpath(full, staging)
+                arc = "HDDCAT/" + rel.replace(os.sep, "/")
+                zi = zipfile.ZipInfo(arc, date_time=now)
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.external_attr = (os.stat(full).st_mode & 0xFFFF) << 16
+                with open(full, "rb") as f:
+                    zf.writestr(zi, f.read())
+                entries.append(arc)
+        shutil.rmtree(staging, ignore_errors=True)
 
         zi = zipfile.ZipInfo("HDDCAT/README.md", date_time=now)
         zi.compress_type = zipfile.ZIP_DEFLATED
@@ -863,6 +906,9 @@ def cmd_build_dist(args):
 
     size = os.path.getsize(zip_path)
     print(f"wrote {zip_path} ({human_size(size)})")
+    print("  แอป: " + ("หน้าต่างของตัวเอง (native shell"
+                       + (", เซ็น ad-hoc แล้ว)" if signed else ", ยังไม่ได้เซ็น)")
+                       if shell_bytes else "เปิดผ่านเบราว์เซอร์ (fallback launcher)"))
     for e in entries:
         print(f"  {e}")
 
@@ -1132,6 +1178,14 @@ def _start_update_job():
             if not os.path.isfile(new_catalog):
                 raise RuntimeError("ไฟล์ zip ใหม่ไม่มี HDDCAT.app ที่ถูกต้อง")
 
+            # zipfile.extractall drops permission bits, so the extracted
+            # executable comes out 0644 and macOS refuses to launch the app.
+            # Put the exec bit back before swapping the bundle in.
+            new_exe = os.path.join(new_app_path, "Contents", "MacOS", "HDDCAT")
+            if not os.path.isfile(new_exe):
+                raise RuntimeError("ไฟล์ zip ใหม่ไม่มีไฟล์รันของแอป")
+            os.chmod(new_exe, 0o755)
+
             ts = time.strftime("%Y%m%d%H%M%S")
             old_backup = bundle_root + ".old-" + ts
             shutil.move(bundle_root, old_backup)
@@ -1358,86 +1412,71 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
   cursor: pointer; }
 .card-del-err { color: var(--color-danger); font-size: 12px; }
 
-/* ---- home hero ---- */
-.hero-section { position: relative; overflow: hidden; }
-#view-home { width: 100vw; margin-left: calc(50% - 50vw); margin-top: -104px; }
-.hero-blob { position: absolute; border-radius: 50%; filter: blur(90px); pointer-events: none; }
-.hero-blob-1 { width: 600px; height: 600px; top: -160px; left: -160px;
-  background: rgba(102, 51, 238, 0.16); }
-.hero-blob-2 { width: 550px; height: 550px; top: 40px; right: -180px;
-  background: rgba(255, 215, 183, 0.55); }
-.hero-content { position: relative; z-index: 1; min-height: 100vh;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  text-align: center; padding: 128px 20px 48px; }
-.hero-badge { text-transform: uppercase; letter-spacing: 2px; font-size: 12px;
-  font-family: var(--font-primary); font-weight: var(--p-semi-bold);
-  color: var(--color-primary); background: rgba(102, 51, 238, 0.08);
-  border: 1px solid rgba(102, 51, 238, 0.25); border-radius: 34px;
-  padding: 8px 20px; margin-bottom: 26px; }
-.hero-h1 { font-family: var(--font-primary); font-weight: var(--p-bold);
-  font-size: clamp(44px, 6vw, 78px); line-height: 1.08; color: var(--color-heading-1);
-  margin-bottom: 18px; }
-.hero-tagline { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
-  font-size: clamp(18px, 2.2vw, 26px); color: var(--color-primary); margin-bottom: 20px; }
-.hero-desc { max-width: 760px; color: var(--color-body-1); font-size: 16px;
-  line-height: 1.75; margin-bottom: 32px; }
-.hero-cta { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
-  margin-bottom: 46px; }
-.hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 18px; max-width: 960px; width: 100%; }
-.hero-stat-num { font-family: var(--font-primary); font-weight: var(--p-bold);
-  font-size: clamp(28px, 3vw, 40px); color: var(--color-primary); margin-bottom: 4px; }
-.hero-stat-label { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
-  font-size: 13px; color: var(--color-title); line-height: 1.5; }
-.hero-stat-label .hero-stat-th { display: block;
-  font-weight: var(--p-regular); font-size: 12px; color: var(--counter-title); }
-.hero-visual { width: 92%; max-width: 1180px; margin: 56px auto 0; }
-.hero-visual img { width: 100%; display: block; border-radius: var(--radius-card);
-  border: 1px solid var(--color-border); box-shadow: 0 30px 80px rgba(5, 1, 28, 0.18); }
-.hero-strip { position: relative; width: 92%; max-width: 1180px; margin: 72px auto 0;
-  border-radius: var(--radius-card); overflow: hidden; box-shadow: var(--shadow-card); }
-.hero-strip img { width: 100%; display: block; }
-.hero-strip-text { position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 32px;
-  background: linear-gradient(0deg, rgba(5,1,28,0.78), rgba(5,1,28,0)); }
-.hero-strip-text h3 { color: var(--color-white); font-size: clamp(20px, 2.6vw, 30px);
-  margin-bottom: 4px; }
-.hero-strip-text p { color: rgba(255,255,255,0.85); font-size: 13.5px; }
-.hero-features { padding: 64px 24px 0; }
-.hero-features-h2 { text-align: center; font-family: var(--font-primary);
-  font-size: clamp(28px, 3.6vw, 44px); margin-bottom: 8px; }
-.hero-features-sub { text-align: center; font-size: 15px; color: var(--counter-title);
-  margin-bottom: 36px; }
-.hero-feature-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 18px; max-width: 1140px; margin: 0 auto; }
-.hero-feature-emoji { font-size: 30px; margin-bottom: 10px; }
-.hero-feature-cards h3 { font-family: var(--font-primary); font-size: 18px; margin-bottom: 6px; }
-.hero-feature-desc { font-size: 13.5px; color: var(--counter-title); line-height: 1.7; }
-.hero-social { display: flex; gap: 12px; justify-content: center; align-items: center;
-  flex-wrap: wrap; margin: 56px 0 0; }
-.ghbtn { display: inline-flex; align-items: center; gap: 9px; font-family: inherit;
-  font-weight: var(--p-medium); font-size: 14.5px; text-decoration: none;
-  color: var(--color-heading-1); background: #fff; border: 1px solid rgba(5, 1, 28, 0.18);
-  border-radius: 34px; padding: 11px 22px; cursor: pointer; }
-.ghbtn svg { width: 18px; height: 18px; }
-.bmc-y { display: inline-flex; align-items: center; gap: 9px; font-family: inherit;
-  font-weight: var(--p-semi-bold); font-size: 14.5px; text-decoration: none;
-  color: #0D0C22; background: #FFDD00; border: none; border-radius: 34px;
-  padding: 12px 22px; cursor: pointer; box-shadow: 0 6px 18px rgba(255, 221, 0, 0.4); }
-.hero-closing { text-align: center; font-size: 13px; color: var(--counter-title);
-  margin: 20px 0 24px; }
-.founder { display: flex; align-items: center; justify-content: center; gap: 48px;
-  max-width: 980px; margin: 88px auto 0; padding: 0 24px; flex-wrap: wrap; }
-.founder img { width: 250px; border-radius: var(--radius-card);
-  box-shadow: 0 20px 60px rgba(5, 1, 28, 0.15); display: block; }
-.founder-text { max-width: 520px; }
-.founder-quote { font-family: var(--font-primary); font-size: clamp(17px, 2vw, 21px);
-  line-height: 1.65; color: var(--color-heading-1); margin-bottom: 18px; }
-.founder-name { font-family: var(--font-primary); font-weight: var(--p-bold);
-  font-size: 16px; color: var(--color-primary); }
-.founder-title { font-size: 13px; color: var(--counter-title); }
-.founder-title a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
-.founder-title a:hover { color: var(--color-primary); }
-@media (max-width: 700px) { .founder { flex-direction: column; text-align: center; } }
+/* ---- home dashboard ---- */
+.home-head { display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.home-title { font-family: var(--font-primary); font-weight: var(--p-bold);
+  font-size: clamp(21px, 2.4vw, 26px); color: var(--color-heading-1); }
+.home-sub { font-size: 13px; color: var(--counter-title); margin-top: 3px; }
+
+.searchbox { position: relative; }
+.searchbox .sb-icon { position: absolute; left: 19px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; color: var(--counter-title); display: flex; }
+.searchbox input { width: 100%; font-family: inherit; font-size: 15.5px;
+  color: var(--color-heading-1); background: var(--color-white);
+  border: 1px solid var(--color-border); border-radius: var(--radius-btn);
+  padding: 15px 20px 15px 50px; box-shadow: var(--shadow-card); outline: none; }
+.searchbox input::placeholder { color: var(--counter-title); }
+.searchbox input:focus { border-color: var(--color-primary); }
+#home-hits { margin-top: 14px; }
+#home-hits .dedup-head { margin-top: 0; }
+#home-hits tr { cursor: pointer; }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 14px; margin: 20px 0 16px; }
+.kpi { background: var(--color-white); border: 1px solid var(--color-border);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 17px 20px; }
+.kpi-num { font-family: var(--font-primary); font-weight: var(--p-bold);
+  font-size: 27px; line-height: 1.15; color: var(--color-heading-1); }
+.kpi-num.small { font-size: 19px; padding-top: 6px; }
+.kpi-label { font-size: 12.5px; color: var(--counter-title); margin-top: 5px; }
+
+.home-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .home-cols { grid-template-columns: 1fr; } }
+.home-panel { background: var(--color-white); border: 1px solid var(--color-border);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 19px 22px 12px; }
+.home-panel h2 { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  font-size: 15.5px; margin-bottom: 10px; display: flex; align-items: center; gap: 9px; }
+.home-panel h2 .pill { font-family: var(--font-secondary); font-size: 11px;
+  font-weight: var(--p-semi-bold); color: var(--color-primary);
+  background: rgba(102, 51, 238, 0.09); border-radius: 20px; padding: 3px 9px; }
+.home-panel h2 .pill.alert { color: var(--color-danger); background: rgba(255, 0, 3, 0.08); }
+
+.mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 0;
+  border-top: 1px solid rgba(5, 1, 28, 0.06); }
+.mini-row.click { cursor: pointer; }
+.mini-row.click:hover .mini-name { color: var(--color-primary); }
+.mini-row:first-of-type { border-top: none; }
+.mini-name { flex: 1; min-width: 0; font-weight: var(--p-medium); font-size: 13.5px;
+  color: var(--color-title); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-meta { font-size: 12px; color: var(--counter-title); white-space: nowrap; }
+.mini-meta.bad { color: var(--color-danger); font-weight: var(--p-semi-bold); }
+.mini-meta.warn { color: var(--color-warning); font-weight: var(--p-medium); }
+.mini-bar { width: 74px; height: 6px; border-radius: 3px; flex: none;
+  background: rgba(5, 1, 28, 0.08); overflow: hidden; }
+.mini-bar i { display: block; height: 100%; background: var(--color-primary); }
+.mini-bar.warn i { background: var(--color-warning); }
+.mini-bar.bad i { background: var(--color-danger); }
+.home-note { font-size: 12.5px; color: var(--counter-title); padding: 4px 0 10px; }
+
+.home-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+
+/* first run - nothing scanned yet */
+.home-first { max-width: 560px; margin: 8vh auto; text-align: center; }
+.home-first .cat { color: var(--color-primary); opacity: .9; }
+.home-first h1 { font-family: var(--font-primary); font-weight: var(--p-bold);
+  font-size: 25px; margin: 14px 0 8px; color: var(--color-heading-1); }
+.home-first p { font-size: 14px; color: var(--counter-title); line-height: 1.75; margin-bottom: 22px; }
 
 /* ---- panels (scan / dedup) ---- */
 .panel { background: var(--color-white); border: 1px solid var(--color-border);
@@ -1570,89 +1609,60 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
 
 <main>
 
-<!-- ================= HOME ================= -->
-<section class="view active hero-section" id="view-home">
-  <div class="hero-blob hero-blob-1"></div>
-  <div class="hero-blob hero-blob-2"></div>
-  <div class="hero-content">
-    <div class="hero-badge">HDD CATALOG — TOUCHNEWMEDIA EDITION</div>
-    <h1 class="hero-h1">Every File You Own.<br>One Search Away.</h1>
-    <p class="hero-tagline">พลังของคลังไฟล์นับล้าน — รวมทุกไดรฟ์ ค้นครั้งเดียว เจอทันที</p>
-    <p class="hero-desc">Scan millions of files in seconds. Organize a decade of client work automatically. Find anything — even on drives sitting on a shelf.<br>สแกนไฟล์เป็นล้านในไม่กี่วินาที จัดเรียงงานทั้งทศวรรษตามลูกค้าและวันที่ แล้วค้นเจอทุกไฟล์ แม้ไดรฟ์จะไม่ได้เสียบอยู่</p>
-    <div class="hero-cta">
-      <button class="btn" id="hero-cta-library">เปิดคลังงาน →</button>
-      <button class="btn btn-border" id="hero-cta-scan">สแกนไดรฟ์</button>
-    </div>
-    <div class="hero-stats">
-      <div class="hero-stat">
-        <div class="hero-stat-num" id="hero-stat-files">0</div>
-        <div class="hero-stat-label">Files Indexed<span class="hero-stat-th">ไฟล์ในคลัง</span></div>
-      </div>
-      <div class="hero-stat">
-        <div class="hero-stat-num" id="hero-stat-drives">0</div>
-        <div class="hero-stat-label">Drives United<span class="hero-stat-th">ไดรฟ์ที่รวมพลัง</span></div>
-      </div>
-      <div class="hero-stat">
-        <div class="hero-stat-num" id="hero-stat-size">0B</div>
-        <div class="hero-stat-label">Under Command<span class="hero-stat-th">ขนาดรวมทั้งหมด</span></div>
-      </div>
-      <div class="hero-stat">
-        <div class="hero-stat-num">&lt;1s</div>
-        <div class="hero-stat-label">To Find Anything<span class="hero-stat-th">ค้นเจอทุกไฟล์</span></div>
-      </div>
-    </div>
-    <div class="hero-visual"><img src="/assets/hero.jpg" alt="กองฮาร์ดดิสก์ยุ่งเหยิง — ลูกเดียวที่เรืองแสงคือลูกที่มีไฟล์ที่คุณตามหา" loading="lazy"
-      onerror="this.closest('.hero-visual,.hero-strip')?.remove()"></div>
+<!-- ================= HOME (app dashboard) ================= -->
+<section class="view active" id="view-home">
+
+  <!-- first run: no drives in the catalog yet -->
+  <div class="home-first" id="home-first" hidden>
+    <div class="cat" id="home-first-cat"></div>
+    <h1>ยังไม่มีไดรฟ์ในคลัง</h1>
+    <p>สแกนไดรฟ์แรกเพื่อเริ่มต้น — HDDCAT จะจำว่าไฟล์ไหนอยู่ไดรฟ์ลูกไหน<br>
+       แล้วค้นเจอได้แม้ไดรฟ์จะถอดไปวางบนชั้นแล้ว</p>
+    <button class="btn" id="home-first-scan">สแกนไดรฟ์แรก</button>
   </div>
 
-  <div class="hero-strip">
-    <img src="/assets/shelf.jpg" alt="" loading="lazy"
-      onerror="this.closest('.hero-visual,.hero-strip')?.remove()">
-    <div class="hero-strip-text">
-      <h3>“หาไฟล์เดียว... แต่ไม่รู้อยู่ลูกไหน”</h3>
-      <p>ปัญหาที่ HDD Catalog เกิดมาเพื่อจบ — ค้นครั้งเดียว รู้ทันทีว่าอยู่ไดรฟ์ไหน โฟลเดอร์ไหน แม้ไดรฟ์จะวางอยู่บนชั้น</p>
+  <div id="home-dash" hidden>
+    <div class="home-head">
+      <div>
+        <div class="home-title">คลังไฟล์ของคุณ</div>
+        <div class="home-sub" id="home-sub">กำลังโหลด…</div>
+      </div>
+      <div class="home-actions" style="margin-top:0">
+        <button class="btn btn-border" id="home-go-library">เปิดคลังงาน</button>
+        <button class="btn btn-border" id="home-go-dedup">หาไฟล์ซ้ำ</button>
+        <button class="btn" id="home-go-scan">สแกนไดรฟ์</button>
+      </div>
     </div>
-  </div>
 
-  <div class="hero-features">
-    <h2 class="hero-features-h2">The Power of HDD Catalog</h2>
-    <p class="hero-features-sub">เครื่องมือเดียว จัดการทุกไดรฟ์ที่คุณมี</p>
-    <div class="hero-feature-cards">
-      <div class="card">
-        <div class="hero-feature-emoji">⚡</div>
-        <h3>Scan at Light Speed</h3>
-        <p class="hero-feature-desc">สแกนไฟล์เป็นล้านในไม่กี่วินาที — เสียบไดรฟ์ปุ๊บ ปุ่มสแกนเด้งทันที</p>
+    <div class="searchbox">
+      <span class="sb-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span>
+      <input type="text" id="home-q" autocomplete="off" spellcheck="false"
+             placeholder="ค้นหาไฟล์จากทุกไดรฟ์ — พิมพ์ชื่อไฟล์อย่างน้อย 2 ตัวอักษร">
+    </div>
+    <div id="home-hits"></div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-num" id="kpi-drives">0</div>
+        <div class="kpi-label">ไดรฟ์ในคลัง</div></div>
+      <div class="kpi"><div class="kpi-num" id="kpi-files">0</div>
+        <div class="kpi-label">ไฟล์ที่ค้นได้</div></div>
+      <div class="kpi"><div class="kpi-num" id="kpi-size">0B</div>
+        <div class="kpi-label">ขนาดรวมในคลัง</div></div>
+      <div class="kpi"><div class="kpi-num small" id="kpi-last">—</div>
+        <div class="kpi-label">สแกนล่าสุด</div></div>
+    </div>
+
+    <div class="home-cols">
+      <div class="home-panel">
+        <h2>พื้นที่ไดรฟ์ <span class="pill" id="home-space-pill" hidden></span></h2>
+        <div id="home-space"></div>
       </div>
-      <div class="card">
-        <div class="hero-feature-emoji">🔌</div>
-        <h3>Search the Unplugged</h3>
-        <p class="hero-feature-desc">รู้ว่าไฟล์อยู่ไดรฟ์ลูกไหนโดยไม่ต้องเสียบสักลูก — ค้นจากชั้นวางได้เลย</p>
-      </div>
-      <div class="card">
-        <div class="hero-feature-emoji">🗂️</div>
-        <h3>A Decade, Organized</h3>
-        <p class="hero-feature-desc">จัดเรียงงานทุกยุคตามลูกค้าและวันที่อัตโนมัติ — อ่านได้ทั้ง ค.ศ. และ พ.ศ.</p>
-      </div>
-      <div class="card">
-        <div class="hero-feature-emoji">♻️</div>
-        <h3>Reclaim Your Terabytes</h3>
-        <p class="hero-feature-desc">จับไฟล์ซ้ำข้ามไดรฟ์ คืนพื้นที่หลายร้อย GB ในคลิกเดียว</p>
+      <div class="home-panel">
+        <h2>สแกนล่าสุด</h2>
+        <div id="home-recent"></div>
       </div>
     </div>
-    <div class="founder" id="founder-sec">
-      <img src="/assets/founder.jpg" alt="Korakot Changpan"
-           onerror="document.getElementById('founder-sec').style.display='none'">
-      <div class="founder-text">
-        <p class="founder-quote">“ผมสร้าง HDD Catalog เพราะเจอปัญหานี้เองทุกวัน — งานสิบปีกระจายอยู่บนไดรฟ์นับสิบลูก ตอนนี้ทุกไฟล์ตอบได้ในการค้นครั้งเดียว”</p>
-        <p class="founder-name">Korakot Changpan</p>
-        <p class="founder-title">CEO of <a href="https://www.thetnm.com" target="_blank" rel="noopener">Touchnewmedia</a></p>
-      </div>
-    </div>
-    <div class="hero-social">
-      <a class="ghbtn" href="https://github.com/korakotcha06-dev/hddcat" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="#05011C"><path fill-rule="evenodd" d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.084 1.84 1.236 1.84 1.236 1.07 1.835 2.807 1.305 3.492.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/></svg>GitHub</a>
-      <a class="bmc-y" href="https://www.buymeacoffee.com/korakot" target="_blank" rel="noopener">☕ Buy me a coffee</a>
-    </div>
-    <p class="hero-closing">Built in one file. No cloud. No subscription. Your archive, your machine. — ทุกอย่างอยู่ในเครื่องคุณ ไม่มี cloud ไม่มีรายเดือน</p>
   </div>
 </section>
 
@@ -1875,34 +1885,131 @@ async function loadFolders() {
 }
 
 /* ---------- drives ---------- */
-/* ---------- home hero ---------- */
-$("hero-cta-library").addEventListener("click", () => gotoTab("library"));
-$("hero-cta-scan").addEventListener("click", () => gotoTab("scan"));
+/* ---------- home dashboard ---------- */
 $("topbar-scan").addEventListener("click", () => gotoTab("scan"));
+$("home-go-library").addEventListener("click", () => gotoTab("library"));
+$("home-go-dedup").addEventListener("click", () => gotoTab("dedup"));
+$("home-go-scan").addEventListener("click", () => gotoTab("scan"));
+$("home-first-scan").addEventListener("click", () => gotoTab("scan"));
+$("home-first-cat").innerHTML = CAT_LG;
+
+function relTime(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return "เมื่อครู่";
+  if (s < 3600) return `${Math.round(s / 60)} นาทีที่แล้ว`;
+  if (s < 86400) return `${Math.round(s / 3600)} ชั่วโมงที่แล้ว`;
+  if (s < 86400 * 30) return `${Math.round(s / 86400)} วันที่แล้ว`;
+  return new Date(ts * 1000).toLocaleDateString("th-TH");
+}
+
+/* free-space class shared with the drives tab: <15% red, <30% amber */
+function freeClass(pct) { return pct === null ? "" : pct < 15 ? "bad" : pct < 30 ? "warn" : "ok"; }
 
 let homeStatsAnimated = false;
 function renderHomeStats(drives) {
+  const dash = $("home-dash"), first = $("home-first");
+  if (!drives.length) { dash.hidden = true; first.hidden = false; return; }
+  first.hidden = true; dash.hidden = false;
+
   const totalFiles = drives.reduce((s, d) => s + d.files, 0);
   const totalBytes = drives.reduce((s, d) => s + d.bytes, 0);
-  const driveCount = drives.length;
-  if (homeStatsAnimated) {
-    $("hero-stat-files").textContent = totalFiles.toLocaleString();
-    $("hero-stat-drives").textContent = driveCount.toLocaleString();
-    $("hero-stat-size").textContent = human(totalBytes);
-    return;
+  const lastTs = drives.reduce((m, d) => Math.max(m, d.last_scanned || 0), 0);
+
+  $("home-sub").textContent =
+    `${drives.length} ไดรฟ์ · ${totalFiles.toLocaleString()} ไฟล์ · ${human(totalBytes)} — ค้นได้ทั้งหมดโดยไม่ต้องเสียบไดรฟ์`;
+  $("kpi-last").textContent = relTime(lastTs);
+
+  /* count-up once per session, then just set the numbers */
+  const setNums = e => {
+    $("kpi-drives").textContent = Math.round(drives.length * e).toLocaleString();
+    $("kpi-files").textContent = Math.round(totalFiles * e).toLocaleString();
+    $("kpi-size").textContent = human(totalBytes * e);
+  };
+  if (homeStatsAnimated) { setNums(1); }
+  else {
+    homeStatsAnimated = true;
+    const dur = 900, start = performance.now(), easeOut = t => 1 - Math.pow(1 - t, 3);
+    (function frame(now) {
+      const e = easeOut(Math.min(1, (now - start) / dur));
+      setNums(e);
+      if (e < 1) requestAnimationFrame(frame);
+    })(performance.now());
   }
-  homeStatsAnimated = true;
-  const dur = 1200, start = performance.now();
-  const easeOut = t => 1 - Math.pow(1 - t, 3);
-  function frame(now) {
-    const e = easeOut(Math.min(1, (now - start) / dur));
-    $("hero-stat-files").textContent = Math.round(totalFiles * e).toLocaleString();
-    $("hero-stat-drives").textContent = Math.round(driveCount * e).toLocaleString();
-    $("hero-stat-size").textContent = human(totalBytes * e);
-    if (e < 1) requestAnimationFrame(frame);
+
+  /* --- drive space: the ones that need attention first --- */
+  const withSpace = drives.filter(d => d.total_bytes);
+  const scored = withSpace.map(d => ({d, pct: d.free_bytes / d.total_bytes * 100}))
+                          .sort((a, b) => a.pct - b.pct);
+  const low = scored.filter(x => x.pct < 15).length;
+  const pill = $("home-space-pill");
+  if (low) { pill.hidden = false; pill.className = "pill alert"; pill.textContent = `${low} ลูกใกล้เต็ม`; }
+  else { pill.hidden = false; pill.className = "pill"; pill.textContent = "ยังมีที่ว่างพอ"; }
+
+  const space = $("home-space");
+  if (!scored.length) {
+    space.innerHTML = `<div class="home-note">ยังไม่มีข้อมูลพื้นที่ว่าง — ข้อมูลจะขึ้นหลังสแกนตอนเสียบไดรฟ์อยู่</div>`;
+  } else {
+    space.innerHTML = scored.slice(0, 6).map(({d, pct}) => {
+      const cls = freeClass(pct);
+      return `<div class="mini-row click" data-drive="${esc(d.label)}">
+        <span class="mini-name" title="${esc(d.label)}">${esc(d.label)}</span>
+        <span class="mini-bar ${cls}"><i style="width:${(100 - pct).toFixed(1)}%"></i></span>
+        <span class="mini-meta ${cls === "ok" ? "" : cls}">${cls === "bad" ? "⚠ " : ""}ว่าง ${pct.toFixed(0)}%</span>
+      </div>`;
+    }).join("") +
+    (scored.length > 6 ? `<div class="home-note">และอีก ${scored.length - 6} ไดรฟ์ — ดูทั้งหมดในแท็บ “ไดรฟ์”</div>` : "");
   }
-  requestAnimationFrame(frame);
+
+  /* --- most recently scanned --- */
+  const recent = drives.slice().sort((a, b) => (b.last_scanned || 0) - (a.last_scanned || 0)).slice(0, 6);
+  $("home-recent").innerHTML = recent.map(d => `<div class="mini-row click" data-drive="${esc(d.label)}">
+      <span class="mini-name" title="${esc(d.label)}">${esc(d.label)}</span>
+      <span class="mini-meta">${d.files.toLocaleString()} ไฟล์ · ${esc(d.bytes_human)}</span>
+      <span class="mini-meta">${relTime(d.last_scanned)}</span>
+    </div>`).join("");
+
+  /* jump straight into that drive's library view */
+  document.querySelectorAll("#home-space .mini-row, #home-recent .mini-row").forEach(r =>
+    r.addEventListener("click", () => {
+      gotoTab("library");
+      $("f-drive").value = r.dataset.drive;
+      renderLib();
+    }));
 }
+
+/* --- home file search (same endpoint as the library's filename search) --- */
+let homeSearchT = null;
+$("home-q").addEventListener("input", () => {
+  clearTimeout(homeSearchT);
+  const kw = $("home-q").value.trim();
+  const box = $("home-hits");
+  if (kw.length < 2) { box.innerHTML = ""; return; }
+  homeSearchT = setTimeout(async () => {
+    const res = await api(`/api/search?q=${encodeURIComponent(kw)}`);
+    if (!res.ok) { box.innerHTML = `<div class="hint">ค้นหาไม่สำเร็จ: ${esc(res.error)}</div>`; return; }
+    if (!res.rows.length) {
+      box.innerHTML = `<div class="hint">ไม่พบไฟล์ที่ชื่อมีคำว่า “${esc(kw)}”</div>`;
+      return;
+    }
+    box.innerHTML = `
+      <div class="dedup-head">พบ ${res.rows.length.toLocaleString()}${res.truncated ? "+" : ""} ไฟล์ — คลิกเพื่อดูในคลังงาน</div>
+      <div class="tbl-wrap"><table><tbody>
+      ${res.rows.slice(0, 40).map(f => `<tr data-drive="${esc(f.drive)}">
+        <td><span class="badge drive">${esc(f.drive)}</span></td>
+        <td class="clip" style="max-width:620px" title="${esc(f.relpath)}">${esc(f.relpath)}</td>
+        <td class="num">${esc(f.size_human)}</td>
+        <td class="num muted">${esc(f.mdate)}</td></tr>`).join("")}
+      </tbody></table></div>
+      ${res.rows.length > 40 ? `<div class="home-note">แสดง 40 แถวแรก — ค้นต่อในแท็บ “คลังงาน” เพื่อดูทั้งหมด</div>` : ""}`;
+    box.querySelectorAll("tr").forEach(tr => tr.addEventListener("click", () => {
+      gotoTab("library");
+      $("f-drive").value = tr.dataset.drive;
+      $("q").value = kw;
+      $("q").dispatchEvent(new Event("input"));
+    }));
+  }, 350);
+});
 
 async function loadDrives() {
   const res = await api("/api/drives");
@@ -2445,6 +2552,20 @@ def cmd_serve(args):
     url = f"http://127.0.0.1:{port}/"
     print(f"HDD Catalog web UI: {url}")
     print("เปิดเฉพาะในเครื่องนี้ (127.0.0.1) - กด Ctrl+C เพื่อปิด")
+    if getattr(args, "exit_with_parent", False):
+        # HDDCAT.app runs this as a child process. If the app is force-quit or
+        # crashes it never gets to terminate us, and the orphan keeps holding
+        # the port and the database; getppid() flipping to 1 (or anything else)
+        # means our parent is gone.
+        original_ppid = os.getppid()
+
+        def _watch_parent():
+            while True:
+                time.sleep(2)
+                if os.getppid() != original_ppid:
+                    os._exit(0)
+
+        threading.Thread(target=_watch_parent, daemon=True).start()
     if not args.no_browser:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     try:
@@ -2504,6 +2625,8 @@ def main():
     sp.add_argument("--port", type=int, default=8765)
     sp.add_argument("--no-browser", action="store_true",
                      help="ไม่ต้องเปิด browser อัตโนมัติ")
+    sp.add_argument("--exit-with-parent", action="store_true",
+                     help="ปิดตัวเองเมื่อโปรเซสแม่หายไป (HDDCAT.app ใช้ตอนเรียก server)")
     sp.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("export-folders-csv",
