@@ -17,6 +17,7 @@ Photographers and video editors end up with a mountain of external HDDs — and 
 - Smart library: auto-groups client / job / date (CE + BE calendars)
 - Cross-drive duplicate finder (name+size, read-only)
 - Reclaim space: editor cache/junk detection, big-and-untouched files, where the space went — exports a checklist, never deletes
+- Move plan: which old job folders to move off a near-full drive and which drive can take them (understands that several labels can be one physical disk)
 - Plug-in detection: pops "scan now?" when a drive mounts
 - Self-updating .app, native window, zero telemetry (one version-check ping, can be disabled)
 
@@ -45,6 +46,8 @@ python3 catalog.py serve
 | `report` | per-drive summary |
 | `dedup` | duplicate candidates across drives |
 | `reclaim [--junk\|--big-old\|--by-type]` | what can be deleted/moved to free space (read-only) |
+| `reclaim --move-plan` | which folders to move off the near-full drives, and where to |
+| `reclaim --consolidate` | same job sitting on several drives: a real copy, or split in two |
 | `groups --by-client` | cluster jobs by client name |
 | `export-folders-csv out.csv --smart-depth` | folder rollup for Excel |
 | `export-obsidian <vault>` | one Markdown note per drive |
