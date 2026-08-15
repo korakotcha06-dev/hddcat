@@ -13,6 +13,7 @@ USAGE
   python3 catalog.py groups [--threshold 0.72] [--min-drives 2]
   python3 catalog.py dedup [--min-size-mb 1]
   python3 catalog.py reclaim [--junk] [--big-old] [--by-type]
+  python3 catalog.py open <drive_label> [relpath] [--set-path PATH]
   python3 catalog.py serve [--port 8765] [--no-browser]
   python3 catalog.py export-obsidian <vault_folder>
 
@@ -26,7 +27,9 @@ WORKFLOW
   2. Repeat for every drive you own, whenever convenient (doesn't need to be
      the same session).
   3. `search <keyword>` works even with the drive unplugged - it tells you
-     WHICH drive has the file, so you know what to go plug in.
+     WHICH drive has the file, so you know what to go plug in. Once it IS
+     plugged in, `open <label> <relpath>` (or the button in the web UI) jumps
+     straight to the real folder in Finder.
   4. `groups` looks for folders with similar names living on different drives
      and suggests which one to consolidate onto.
   5. `export-obsidian` writes one markdown note per drive into your vault so
@@ -82,8 +85,12 @@ def get_conn(db_path):
         PRIMARY KEY (drive_label, relpath)
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS drives (
-        drive_label TEXT PRIMARY KEY, total_bytes INTEGER, free_bytes INTEGER, last_scanned REAL
+        drive_label TEXT PRIMARY KEY, total_bytes INTEGER, free_bytes INTEGER, last_scanned REAL,
+        mount_path TEXT
     )""")
+    # catalogs made before "go to folder" have no mount_path column
+    if "mount_path" not in {r[1] for r in conn.execute("PRAGMA table_info(drives)")}:
+        conn.execute("ALTER TABLE drives ADD COLUMN mount_path TEXT")
     return conn
 
 
@@ -126,8 +133,12 @@ def scan_drive(db_path, drive_path, label, progress=None):
         disk_total, disk_free = usage.total, usage.free
     except OSError:
         disk_total, disk_free = None, None
-    conn.execute("INSERT OR REPLACE INTO drives VALUES (?,?,?,?)",
-                 (label, disk_total, disk_free, time.time()))
+    # remember where the drive was mounted so "go to folder" can jump straight
+    # there next time it is plugged in
+    conn.execute("INSERT OR REPLACE INTO drives "
+                 "(drive_label, total_bytes, free_bytes, last_scanned, mount_path) "
+                 "VALUES (?,?,?,?,?)",
+                 (label, disk_total, disk_free, time.time(), drive_path))
     conn.commit()
     conn.close()
     return {"files": count, "bytes": total_bytes, "seconds": time.time() - t0,
@@ -184,6 +195,128 @@ def drives_overview(conn):
         out.append({"label": label, "total_bytes": total_bytes, "free_bytes": free_bytes,
                     "last_scanned": last_scanned, "files": n, "bytes": s})
     return out
+
+
+# ---------------------------------------------------------------- go to folder
+# The catalog stores (drive_label, relpath) only - never an absolute path - so a
+# drive can be cataloged once and browsed forever with it unplugged. To actually
+# open a folder we have to find where that drive lives *right now*.
+
+_TOPS_CACHE = {}
+
+
+def drive_top_entries(conn, label):
+    """Biggest top-level names on a drive - used as a fingerprint to check that
+    a candidate path really is this drive and not some other volume that
+    happens to share its name. Cached per scan (drives.last_scanned)."""
+    stamp = conn.execute("SELECT last_scanned FROM drives WHERE drive_label=?",
+                         (label,)).fetchone()
+    key = (label, stamp[0] if stamp else None)
+    if key in _TOPS_CACHE:
+        return _TOPS_CACHE[key]
+    tops = [r[0] for r in conn.execute(
+        "SELECT depth1 FROM files WHERE drive_label=? AND depth1 != '' "
+        "GROUP BY depth1 ORDER BY COUNT(*) DESC LIMIT 10", (label,))]
+    if not tops:
+        # everything sits loose in the root - fingerprint with filenames instead
+        tops = [r[0] for r in conn.execute(
+            "SELECT filename FROM files WHERE drive_label=? LIMIT 10", (label,))]
+    # the volume poll asks about every drive - keep them all, but don't let a
+    # long-running server grow this without bound (stale scan stamps pile up)
+    if len(_TOPS_CACHE) > 64:
+        _TOPS_CACHE.clear()
+    _TOPS_CACHE[key] = tops
+    return tops
+
+
+def resolve_drive_mount(conn, label):
+    """Where is this drive mounted right now? Returns a path, or None if it is
+    not plugged in. Tries the path seen at scan time first, then /Volumes/<label>
+    (which is what older catalogs, scanned before mount_path existed, rely on)."""
+    cands = []
+    row = conn.execute("SELECT mount_path FROM drives WHERE drive_label=?", (label,)).fetchone()
+    if row and row[0]:
+        cands.append(row[0])
+    vol = os.path.join("/Volumes", label)
+    if vol not in cands:
+        cands.append(vol)
+    tops = None
+    for cand in cands:
+        if not os.path.isdir(cand):
+            continue
+        if tops is None:
+            tops = drive_top_entries(conn, label)
+        # nothing cataloged yet = nothing to disprove, accept the path
+        if not tops or any(os.path.exists(os.path.join(cand, t)) for t in tops):
+            return cand
+    return None
+
+
+def remember_drive_mount(conn, label, path):
+    """Teach the catalog where a drive lives, without a full rescan. Refuses a
+    path whose contents don't look like that drive."""
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        raise ValueError(f"ไม่พบโฟลเดอร์ {path}")
+    if not conn.execute("SELECT 1 FROM drives WHERE drive_label=?", (label,)).fetchone():
+        raise ValueError(f"ไม่มีไดรฟ์ '{label}' ใน catalog")
+    tops = drive_top_entries(conn, label)
+    if tops and not any(os.path.exists(os.path.join(path, t)) for t in tops):
+        raise ValueError(f"{path} ไม่มีโฟลเดอร์ของไดรฟ์ '{label}' อยู่เลย — path ผิดลูกหรือเปล่า")
+    conn.execute("UPDATE drives SET mount_path=? WHERE drive_label=?", (path, label))
+    conn.commit()
+    return path
+
+
+def folder_to_relpath(folder):
+    """Library rows use two display-only bucket names that are not real folders."""
+    if not folder or folder == "(root)":
+        return ""
+    tail = os.sep + "(loose files)"
+    if folder.endswith(tail):
+        return folder[:-len(tail)]
+    return folder
+
+
+def locate_on_drive(conn, label, relpath=""):
+    """(drive label, catalog relpath) -> a real path to open.
+
+    Returns a dict with ok/path/exact, or ok=False + reason:
+      not_plugged   - the drive isn't mounted anywhere we can find
+      outside_drive - relpath escaped the drive root (never happens from the UI)
+    A folder that was renamed or moved since the scan falls back to the nearest
+    parent that still exists, flagged with exact=False."""
+    mount = resolve_drive_mount(conn, label)
+    if not mount:
+        return {"ok": False, "reason": "not_plugged",
+                "error": f"ยังไม่ได้เสียบไดรฟ์ '{label}' (หรือ HDDCAT ยังไม่รู้ว่ามันอยู่ที่ไหน)"}
+    root = os.path.realpath(mount)
+    rel = (relpath or "").strip().strip("/").strip(os.sep)
+    target = os.path.realpath(os.path.join(root, rel)) if rel else root
+    if target != root and not target.startswith(root + os.sep):
+        return {"ok": False, "reason": "outside_drive", "error": "path หลุดออกนอกไดรฟ์"}
+    exact = os.path.exists(target)
+    if not exact:
+        probe = os.path.dirname(target)
+        while len(probe) > len(root) and not os.path.exists(probe):
+            probe = os.path.dirname(probe)
+        target = probe if os.path.exists(probe) else root
+    return {"ok": True, "mount": mount, "path": target, "exact": exact}
+
+
+def reveal_in_file_manager(target):
+    """Show `target` in the desktop file manager: a folder opens, a file opens
+    its folder with the file selected. Returns the command that was run."""
+    is_file = os.path.isfile(target)
+    if sys.platform == "darwin":
+        cmd = ["open", "-R", target] if is_file else ["open", target]
+    elif os.name == "nt":
+        cmd = ["explorer", f"/select,{target}"] if is_file else ["explorer", target]
+    else:
+        cmd = ["xdg-open", os.path.dirname(target) if is_file else target]
+    subprocess.run(cmd, check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return cmd
 
 
 def cmd_report(args):
@@ -1003,6 +1136,29 @@ def cmd_forget(args):
         print(f"ลบ '{args.label}' ออกจาก catalog แล้ว ({n} ไฟล์) - ไฟล์จริงไม่ถูกแตะ")
 
 
+def cmd_open(args):
+    conn = get_conn(args.db)
+    if args.set_path:
+        try:
+            saved = remember_drive_mount(conn, args.label, args.set_path)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        print(f"จำแล้ว: '{args.label}' อยู่ที่ {saved}")
+    loc = locate_on_drive(conn, args.label, args.relpath)
+    conn.close()
+    if not loc["ok"]:
+        print(f"ERROR: {loc['error']}")
+        if loc["reason"] == "not_plugged":
+            print(f"ถ้าเสียบอยู่แล้วแต่ยังหาไม่เจอ บอก path ให้รู้ด้วย: "
+                  f"python3 catalog.py open {args.label} --set-path /Volumes/...")
+        sys.exit(1)
+    if not loc["exact"]:
+        print("ไม่เจอ path นั้นแล้ว (ย้าย/เปลี่ยนชื่อไปหรือเปล่า) - เปิดโฟลเดอร์แม่ที่ใกล้ที่สุดแทน")
+    print(f"เปิด {loc['path']}")
+    reveal_in_file_manager(loc["path"])
+
+
 _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
 
 สแกนฮาร์ดดิสก์ทุกลูกของคุณเข้า catalog เดียว ค้นเจอทุกไฟล์ในเสี้ยววินาที
@@ -1036,7 +1192,17 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
     python3 catalog.py scan /Volumes/ไดรฟ์ของคุณ --label ชื่อไดรฟ์
     python3 catalog.py search คำค้น
     python3 catalog.py reclaim --big-old --md เคลียร์พื้นที่.md
+    python3 catalog.py open ชื่อไดรฟ์ "โฟลเดอร์/ในไดรฟ์"
     python3 catalog.py serve
+
+## เปิดโฟลเดอร์จริงได้เลย ถ้าเสียบไดรฟ์อยู่
+
+ทุกแถวในคลังงาน (และในผลค้นหา) มีปุ่ม **เปิดโฟลเดอร์ / เปิด** — กดแล้วเด้ง Finder
+ไปที่ของจริงบนไดรฟ์ทันที ถ้ายังไม่ได้เสียบไดรฟ์ลูกนั้น ปุ่มจะเป็นสีเทากดไม่ได้
+และบอกว่าต้องเสียบลูกไหน
+
+ไดรฟ์ที่สแกนไว้ตั้งแต่ก่อนมีฟีเจอร์นี้ HDDCAT อาจยังไม่รู้ว่ามันอยู่ที่ไหน —
+ไปที่แท็บ "ไดรฟ์" กด **บอกที่อยู่ไดรฟ์** แล้วใส่ path ครั้งเดียว (ไม่ต้องสแกนใหม่)
 
 ---
 MIT License · © 2026 [Touchnewmedia Co., Ltd.](https://www.thetnm.com)
@@ -1739,6 +1905,21 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
   cursor: pointer; }
 .card-del-err { color: var(--color-danger); font-size: 12px; }
 
+/* "go to folder" - only live while the drive is actually plugged in */
+.btn-go { font-size: 12px; padding: 4px 12px; border-radius: 20px; cursor: pointer;
+  background: transparent; color: var(--color-primary); white-space: nowrap;
+  border: 1px solid var(--color-primary); }
+.btn-go:hover:not(:disabled) { background: rgba(102, 51, 238, 0.09); }
+.btn-go:disabled { color: var(--counter-title); border-color: var(--color-border);
+  cursor: not-allowed; opacity: 0.7; }
+.btn-go.tiny { font-size: 11px; padding: 2px 9px; }
+.go-note { font-size: 12px; margin-left: 8px; color: var(--counter-title); }
+.go-note.err { color: var(--color-danger); }
+.card-go { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.card-go input { flex: 1 1 150px; min-width: 0; font-size: 12px; padding: 5px 10px;
+  border-radius: 20px; border: 1px solid var(--color-border); background: var(--color-white);
+  color: var(--color-title); }
+
 /* ---- home dashboard ---- */
 .home-head { display: flex; align-items: flex-end; justify-content: space-between;
   gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -2032,6 +2213,8 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
     <div class="kpis">
       <div class="kpi"><div class="kpi-num" id="kpi-drives">0</div>
         <div class="kpi-label">ไดรฟ์ในคลัง</div></div>
+      <div class="kpi"><div class="kpi-num" id="home-connected">0</div>
+        <div class="kpi-label">เสียบอยู่ตอนนี้</div></div>
       <div class="kpi"><div class="kpi-num" id="kpi-files">0</div>
         <div class="kpi-label">ไฟล์ที่ค้นได้</div></div>
       <div class="kpi"><div class="kpi-num" id="kpi-size">0B</div>
@@ -2203,9 +2386,66 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g,
 const NO_CLIENT = "(no client)";
 const HDDCAT_VERSION = "{{VERSION}}";
 const api = async (path, opts) => {
-  const r = await fetch(path, opts);
+  /* no-store: these answers go stale the moment a drive is unplugged or a scan
+     finishes, and a heuristically cached GET shows a drive that isn't there */
+  const r = await fetch(path, Object.assign({cache: "no-store"}, opts));
   return r.json();
 };
+
+/* ---------- go to folder ----------
+   The catalog knows [drive, relpath] but not where that drive is right now, so
+   every "เปิดโฟลเดอร์" button stays dead until /api/volumes says the drive is
+   reachable. MOUNTED is refreshed by the same 4s poll that shows drive toasts. */
+let MOUNTED = {};
+
+/* library buckets that aren't real folders on disk (mirrors folder_to_relpath) */
+function folderToRel(folder) {
+  if (!folder || folder === "(root)") return "";
+  return folder.endsWith("/(loose files)") ? folder.slice(0, -"/(loose files)".length) : folder;
+}
+
+function goBtn(drive, relpath, text, cls) {
+  const on = Object.prototype.hasOwnProperty.call(MOUNTED, drive);
+  return `<button class="btn-go${cls ? " " + cls : ""}" data-go-drive="${esc(drive)}"
+    data-go-rel="${esc(relpath ?? "")}" ${on ? "" : "disabled"}
+    title="${on ? "เปิดใน Finder" : "เสียบไดรฟ์ " + esc(drive) + " ก่อน"}"
+    >${esc(text || "เปิดโฟลเดอร์")}</button>`;
+}
+
+/* buttons rendered while a drive was unplugged (or vice versa) catch up here */
+function refreshGoButtons() {
+  document.querySelectorAll("[data-go-drive]").forEach(b => {
+    const drive = b.dataset.goDrive;
+    const on = Object.prototype.hasOwnProperty.call(MOUNTED, drive);
+    b.disabled = !on;
+    b.title = on ? "เปิดใน Finder" : "เสียบไดรฟ์ " + drive + " ก่อน";
+  });
+}
+
+function goNote(btn, msg, isErr) {
+  btn.parentNode.querySelectorAll(".go-note").forEach(n => n.remove());
+  const n = document.createElement("span");
+  n.className = "go-note" + (isErr ? " err" : "");
+  n.textContent = msg;
+  btn.after(n);
+  setTimeout(() => n.remove(), 4000);
+}
+
+/* capture phase: a drive card's own click handler jumps to the library, and it
+   sits between this button and document - we have to win the race */
+document.addEventListener("click", async e => {
+  const btn = e.target.closest("[data-go-drive]");
+  if (!btn || btn.disabled) return;
+  e.stopPropagation();
+  e.preventDefault();
+  btn.disabled = true;
+  const res = await api("/api/reveal", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({drive: btn.dataset.goDrive, relpath: btn.dataset.goRel})});
+  btn.disabled = false;
+  if (!res.ok) { goNote(btn, res.error || "เปิดไม่สำเร็จ", true); return; }
+  if (!res.exact) goNote(btn, "ไม่เจอโฟลเดอร์นั้นแล้ว — เปิดโฟลเดอร์แม่ให้แทน");
+}, true);
 
 /* ---------- cat loader (replaces old .spin) ---------- */
 const CAT_SM = '<span class="cat-loader small"><svg width="26" height="18" viewBox="0 0 32 22" fill="currentColor"><rect x="2" y="16.5" width="28" height="3.5" rx="1.75" opacity=".35"/><path d="M6.3 16.5c-1.9 0-3.3-1.3-3.3-3 0-.9.6-1.6 1.4-1.9C5.3 8 8.6 5.4 12.6 5.4c2.3 0 4.4.85 5.9 2.2l.5-2.3c.07-.33.5-.42.7-.15l1.6 2.1c.5-.1 1-.1 1.5-.02l1.7-2c.22-.26.64-.15.7.18l.4 2.35c1.3.9 2.1 2.3 2.1 3.9 0 1.4-.63 2.68-1.66 3.58.04.15.06.3.06.47 0 .95-.83 1.72-1.85 1.72H6.3z"/></svg><span class="zz z1">z</span><span class="zz z2">z</span><span class="zz z3">z</span></span>';
@@ -2288,12 +2528,17 @@ $("lib-body").addEventListener("click", async e => {
   tr.after(det);
   const res = await api(`/api/files?drive=${encodeURIComponent(tr.dataset.drive)}&folder=${encodeURIComponent(tr.dataset.folder)}`);
   if (!res.ok) { det.innerHTML = `<td colspan="8">โหลดไม่สำเร็จ: ${esc(res.error)}</td>`; return; }
+  const drive = tr.dataset.drive;
   const rows = res.rows.map(f => `
     <tr><td class="clip" style="max-width:560px" title="${esc(f.relpath)}">${esc(f.relpath)}</td>
     <td class="muted">${esc(f.ext)}</td><td class="num">${esc(f.size_human)}</td>
-    <td class="num muted">${esc(f.mdate)}</td></tr>`).join("");
+    <td class="num muted">${esc(f.mdate)}</td>
+    <td class="num">${goBtn(drive, f.relpath, "เปิด", "tiny")}</td></tr>`).join("");
   det.innerHTML = `<td colspan="8"><div class="file-list">
-    <div class="hint" style="margin-bottom:6px">${res.rows.length.toLocaleString()} ไฟล์${res.truncated ? " (แสดง 1,000 แรก)" : ""} ใน ${esc(tr.dataset.folder)}</div>
+    <div class="hint" style="margin-bottom:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>${res.rows.length.toLocaleString()} ไฟล์${res.truncated ? " (แสดง 1,000 แรก)" : ""} ใน ${esc(tr.dataset.folder)}</span>
+      ${goBtn(drive, folderToRel(tr.dataset.folder), "เปิดโฟลเดอร์นี้")}
+    </div>
     <table>${rows}</table></div></td>`;
 });
 
@@ -2314,7 +2559,8 @@ $("q").addEventListener("input", () => {
         <td><span class="badge drive">${esc(f.drive)}</span></td>
         <td class="clip" style="max-width:640px" title="${esc(f.relpath)}">${esc(f.relpath)}</td>
         <td class="num">${esc(f.size_human)}</td>
-        <td class="num muted">${esc(f.mdate)}</td></tr>`).join("")}
+        <td class="num muted">${esc(f.mdate)}</td>
+        <td class="num">${goBtn(f.drive, f.relpath, "เปิด", "tiny")}</td></tr>`).join("")}
       </tbody></table></div>`;
   }, 350);
 });
@@ -2364,6 +2610,11 @@ function relTime(ts) {
 function freeClass(pct) { return pct === null ? "" : pct < 15 ? "bad" : pct < 30 ? "warn" : "ok"; }
 
 let homeStatsAnimated = false;
+function renderConnected() {
+  const el = $("home-connected");
+  if (el) el.textContent = Object.keys(MOUNTED).length.toLocaleString();
+}
+
 function renderHomeStats(drives) {
   const dash = $("home-dash"), first = $("home-first");
   if (!drives.length) { dash.hidden = true; first.hidden = false; return; }
@@ -2376,6 +2627,7 @@ function renderHomeStats(drives) {
   $("home-sub").textContent =
     `${drives.length} ไดรฟ์ · ${totalFiles.toLocaleString()} ไฟล์ · ${human(totalBytes)} — ค้นได้ทั้งหมดโดยไม่ต้องเสียบไดรฟ์`;
   $("kpi-last").textContent = relTime(lastTs);
+  renderConnected();
 
   /* count-up once per session, then just set the numbers */
   const setNums = e => {
@@ -2456,7 +2708,8 @@ $("home-q").addEventListener("input", () => {
         <td><span class="badge drive">${esc(f.drive)}</span></td>
         <td class="clip" style="max-width:620px" title="${esc(f.relpath)}">${esc(f.relpath)}</td>
         <td class="num">${esc(f.size_human)}</td>
-        <td class="num muted">${esc(f.mdate)}</td></tr>`).join("")}
+        <td class="num muted">${esc(f.mdate)}</td>
+        <td class="num">${goBtn(f.drive, f.relpath, "เปิด", "tiny")}</td></tr>`).join("")}
       </tbody></table></div>
       ${res.rows.length > 40 ? `<div class="home-note">แสดง 40 แถวแรก — ค้นต่อในแท็บ “คลังงาน” เพื่อดูทั้งหมด</div>` : ""}`;
     box.querySelectorAll("tr").forEach(tr => tr.addEventListener("click", () => {
@@ -2468,9 +2721,20 @@ $("home-q").addEventListener("input", () => {
   }, 350);
 });
 
+/* the volume poll can fire loadDrives() while one is already in flight - without
+   this the slower response repaints the cards with older mount state */
+let drivesSeq = 0;
+
 async function loadDrives() {
+  const seq = ++drivesSeq;
   const res = await api("/api/drives");
+  if (seq !== drivesSeq) return;
   if (!res.ok) { $("drive-cards").innerHTML = esc(res.error); return; }
+  /* seed MOUNTED for the first paint only - after that the 4s volume poll owns
+     it (re-seeding here would fight the poll and re-trigger this function) */
+  if (!Object.keys(MOUNTED).length) {
+    res.drives.forEach(d => { if (d.mount) MOUNTED[d.label] = d.mount; });
+  }
   ["rc-drive", "rc-type-drive"].forEach((id, i) => {
     const el = $(id);
     const first = el.options[0].outerHTML;
@@ -2497,9 +2761,45 @@ async function loadDrives() {
       <div class="stats">${d.files.toLocaleString()} ไฟล์ใน catalog · ${esc(d.bytes_human)}<br>
         ${d.total_bytes ? `ความจุ ${esc(d.total_human)}` : ""}</div>
       <div class="scanned">สแกนล่าสุด: ${esc(scanned)}</div>
+      <div class="card-go">
+        ${d.mount ? `${goBtn(d.label, "", "เปิดไดรฟ์")}
+             <span class="scanned clip" title="${esc(d.mount)}">${esc(d.mount)}</span>`
+          : `<span class="scanned">ไม่ได้เสียบอยู่</span>
+             <button class="btn-go" data-teach="${esc(d.label)}">บอกที่อยู่ไดรฟ์</button>`}
+      </div>
       <button class="card-del" data-label="${esc(d.label)}">ลบออกจาก catalog</button>
     </div>`;
   }).join("");
+  /* a drive scanned before mount_path existed (or moved) - let Touch point at it
+     once instead of rescanning terabytes */
+  document.querySelectorAll("#drive-cards [data-teach]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const label = btn.dataset.teach;
+      const wrap = document.createElement("span");
+      wrap.style.cssText = "display:flex;gap:8px;flex:1 1 100%;align-items:center;flex-wrap:wrap";
+      wrap.innerHTML = `<input type="text" list="volumes" placeholder="/Volumes/${esc(label)}">
+        <button class="btn-go">บันทึก</button>`;
+      wrap.addEventListener("click", e2 => e2.stopPropagation());
+      btn.replaceWith(wrap);
+      const input = wrap.querySelector("input"), save = wrap.querySelector("button");
+      input.focus();
+      const submit = async () => {
+        const path = input.value.trim();
+        if (!path) return;
+        save.disabled = true;
+        const r = await api("/api/drive-path", {method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({label, path})});
+        save.disabled = false;
+        if (!r.ok) { goNote(save, r.error, true); return; }
+        MOUNTED[label] = r.mount;
+        loadDrives();
+      };
+      save.addEventListener("click", submit);
+      input.addEventListener("keydown", ev => { if (ev.key === "Enter") submit(); });
+    });
+  });
   document.querySelectorAll("#drive-cards .card").forEach(c => c.addEventListener("click", () => {
     gotoTab("library"); $("f-drive").value = c.dataset.label; renderLib();
   }));
@@ -2791,6 +3091,15 @@ async function pollVolumes() {
   try {
     const v = await api("/api/volumes");
     if (v.ok) {
+      const before = Object.keys(MOUNTED).sort().join("|");
+      MOUNTED = v.mounted || {};
+      if (Object.keys(MOUNTED).sort().join("|") !== before) {
+        refreshGoButtons();
+        renderConnected();
+        /* a card shows either the drive's path or a "บอกที่อยู่ไดรฟ์" prompt -
+           greying the button isn't enough, the card body has to be rebuilt */
+        loadDrives();
+      }
       const cur = new Map(v.volumes.map(x => [x.path, x]));
       $("volumes").innerHTML = v.volumes.map(x => `<option value="${esc(x.path)}">`).join("");
       if (knownVols !== null) {
@@ -2965,17 +3274,22 @@ def cmd_serve(args):
         def log_message(self, fmt, *a):
             pass  # keep the terminal quiet
 
-        def _send(self, code, body, ctype):
+        def _send(self, code, body, ctype, no_store=False):
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            if no_store:
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
         def _json(self, obj, code=200):
+            # API answers change under the UI's feet (a scan finishes, a drive is
+            # unplugged) - without this the browser heuristically caches them and
+            # shows a drive as reachable after it's gone
             self._send(code, json.dumps(obj, ensure_ascii=False),
-                       "application/json; charset=utf-8")
+                       "application/json; charset=utf-8", no_store=True)
 
         def do_GET(self):
             try:
@@ -2984,7 +3298,9 @@ def cmd_serve(args):
                 route = u.path
                 if route == "/":
                     html = INDEX_HTML.replace("{{VERSION}}", __version__)
-                    self._send(200, html, "text/html; charset=utf-8")
+                    # same URL every release - a cached page means an updated
+                    # HDDCAT keeps serving the previous version's UI
+                    self._send(200, html, "text/html; charset=utf-8", no_store=True)
                 elif route == "/theme.css":
                     # optional override file next to catalog.py (Touch's custom CSS)
                     theme = os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme.css")
@@ -2992,7 +3308,7 @@ def cmd_serve(args):
                     if os.path.exists(theme):
                         with open(theme, encoding="utf-8") as f:
                             css = f.read()
-                    self._send(200, css, "text/css; charset=utf-8")
+                    self._send(200, css, "text/css; charset=utf-8", no_store=True)
                 elif route == "/api/folders":
                     conn = get_conn(db_path)
                     rows = conn.execute(
@@ -3006,6 +3322,8 @@ def cmd_serve(args):
                 elif route == "/api/drives":
                     conn = get_conn(db_path)
                     drives = drives_overview(conn)
+                    for d in drives:
+                        d["mount"] = resolve_drive_mount(conn, d["label"])
                     conn.close()
                     for d in drives:
                         d["bytes_human"] = human_size(d["bytes"])
@@ -3102,10 +3420,17 @@ def cmd_serve(args):
                                 "available": available, "enabled": st.get("enabled", True)})
                 elif route == "/api/volumes":
                     vols = []
+                    mounted = {}
                     try:
                         conn = get_conn(db_path)
                         known = {r[0]: r[1] for r in conn.execute(
                             "SELECT drive_label, last_scanned FROM drives")}
+                        # which cataloged drives can we reach right now? drives the
+                        # UI can "go to folder" on (cheap: unplugged ones fail isdir)
+                        for lbl in known:
+                            m = resolve_drive_mount(conn, lbl)
+                            if m:
+                                mounted[lbl] = m
                         conn.close()
                         for v in sorted(os.listdir("/Volumes")):
                             if v.startswith("."):
@@ -3118,7 +3443,7 @@ def cmd_serve(args):
                                          "last_scanned": known.get(v)})
                     except OSError:
                         pass
-                    self._json({"ok": True, "volumes": vols})
+                    self._json({"ok": True, "volumes": vols, "mounted": mounted})
                 elif route.startswith("/assets/"):
                     name = os.path.basename(route[len("/assets/"):])
                     ctypes = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -3211,6 +3536,37 @@ def cmd_serve(args):
                         self._json({"ok": False, "error": "ไม่พบ drive นี้ใน catalog"}, 404)
                     else:
                         self._json({"ok": True, "files_removed": n})
+                elif self.path == "/api/reveal":
+                    label = (body.get("drive") or "").strip()
+                    if not label:
+                        self._json({"ok": False, "error": "ต้องระบุ drive"}, 400)
+                        return
+                    rel = body.get("relpath")
+                    if rel is None:
+                        rel = folder_to_relpath(body.get("folder") or "")
+                    conn = get_conn(db_path)
+                    loc = locate_on_drive(conn, label, rel)
+                    conn.close()
+                    if not loc["ok"]:
+                        self._json(loc, 409 if loc["reason"] == "not_plugged" else 400)
+                        return
+                    reveal_in_file_manager(loc["path"])
+                    self._json({"ok": True, "path": loc["path"], "exact": loc["exact"]})
+                elif self.path == "/api/drive-path":
+                    label = (body.get("label") or "").strip()
+                    path = (body.get("path") or "").strip()
+                    if not label or not path:
+                        self._json({"ok": False, "error": "ต้องใส่ทั้ง label และ path"}, 400)
+                        return
+                    conn = get_conn(db_path)
+                    try:
+                        saved = remember_drive_mount(conn, label, path)
+                    except ValueError as e:
+                        self._json({"ok": False, "error": str(e)}, 400)
+                        return
+                    finally:
+                        conn.close()
+                    self._json({"ok": True, "mount": saved})
                 else:
                     self._json({"ok": False, "error": "not found"}, 404)
             except (BrokenPipeError, ConnectionResetError):
@@ -3314,6 +3670,14 @@ def main():
     sp.add_argument("label")
     sp.add_argument("--yes", action="store_true", help="ยืนยันการลบ")
     sp.set_defaults(func=cmd_forget)
+
+    sp = sub.add_parser("open", help="เปิดโฟลเดอร์จริงบนไดรฟ์ที่เสียบอยู่ (Finder)")
+    sp.add_argument("label")
+    sp.add_argument("relpath", nargs="?", default="",
+                    help="path ในไดรฟ์ตามที่เห็นใน catalog (เว้นว่าง = รากไดรฟ์)")
+    sp.add_argument("--set-path", metavar="PATH",
+                    help="บอก HDDCAT ว่าไดรฟ์นี้อยู่ที่ไหน โดยไม่ต้องสแกนใหม่")
+    sp.set_defaults(func=cmd_open)
 
     sp = sub.add_parser("build-dist", help="สร้าง dist/HDDCAT.zip สำหรับแจกจ่าย")
     sp.set_defaults(func=cmd_build_dist)
