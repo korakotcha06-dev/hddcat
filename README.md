@@ -19,6 +19,7 @@ Photographers and video editors end up with a mountain of external HDDs — and 
 - Reclaim space: editor cache/junk detection, big-and-untouched files, where the space went — exports a checklist, never deletes
 - Move plan: which old job folders to move off a near-full drive and which drive can take them (understands that several labels can be one physical disk)
 - Plug-in detection: pops "scan now?" when a drive mounts
+- Go to folder: once a drive is plugged in, jump from any row — library, search hits, or the reclaim-space lists — straight to the real folder in Finder (greyed out while the drive is away)
 - Self-updating .app, native window, zero telemetry (one version-check ping, can be disabled)
 
 ## The whole app is ONE file
@@ -52,6 +53,7 @@ python3 catalog.py serve
 | `export-folders-csv out.csv --smart-depth` | folder rollup for Excel |
 | `export-obsidian <vault>` | one Markdown note per drive |
 | `forget <label> --yes` | remove a drive from the catalog |
+| `open <label> [relpath]` | open the real folder in Finder, if that drive is plugged in |
 | `serve` | local web UI |
 | `build-dist` | build the distributable zip (.app) |
 
