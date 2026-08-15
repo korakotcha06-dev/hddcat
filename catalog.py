@@ -13,6 +13,7 @@ USAGE
   python3 catalog.py groups [--threshold 0.72] [--min-drives 2]
   python3 catalog.py dedup [--min-size-mb 1]
   python3 catalog.py reclaim [--junk] [--big-old] [--by-type]
+  python3 catalog.py reclaim --move-plan [--target-free 15] [--md แผน.md]
   python3 catalog.py open <drive_label> [relpath] [--set-path PATH]
   python3 catalog.py serve [--port 8765] [--no-browser]
   python3 catalog.py export-obsidian <vault_folder>
@@ -35,7 +36,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import argparse
 import json
@@ -1094,6 +1095,229 @@ def reclaim_bad_mtime(conn):
     return _cached(conn, "badmtime", build)
 
 
+# ------------------------------ move plan (Phase 3) ------------------------------
+# "ไดรฟ์ไหนใกล้เต็ม ย้ายอะไรไปไหนดี" - ยังคงเป็นการอ่านอย่างเดียว: เสนอเป็น checklist
+# ไม่มีการย้าย/ลบไฟล์ใด ๆ จากโค้ดนี้
+
+RECLAIM_TARGET_FREE = 0.15         # อยากให้ทุกไดรฟ์เหลือที่ว่างอย่างน้อยเท่านี้
+_SAME_VOLUME_SLACK = 2 * 1024 ** 3  # free ต่างกันไม่เกินเท่านี้ + ความจุเท่ากัน = ไดรฟ์ลูกเดียวกัน
+
+
+def reclaim_volume_groups(conn):
+    """หลาย label อาจเป็นดิสก์ลูกเดียวกัน (เช่น Mac-Desktop / Mac-Documents / Mac-Pictures
+    ที่เป็น SSD ในเครื่องลูกเดียว) - ถ้าไม่จับกลุ่มไว้ ที่ว่างก้อนเดียวจะถูกนับซ้ำเป็นหลาย
+    ปลายทาง และแผนจะเสนอ "ย้ายจากตัวเองไปตัวเอง". เกณฑ์: ความจุเท่ากันเป๊ะ และที่ว่างต่างกัน
+    ไม่เกิน 2GB (ตรวจกับข้อมูลจริงแล้ว: แยก Mac-* ห้า label ออกจากไดรฟ์ 2TB ห้าลูกที่ความจุ
+    เท่ากันแต่ที่ว่างต่างกันหลายร้อย GB ได้ถูกต้อง)"""
+    rows = conn.execute(
+        "SELECT drive_label, total_bytes, free_bytes, last_scanned FROM drives "
+        "WHERE total_bytes IS NOT NULL AND free_bytes IS NOT NULL").fetchall()
+    groups = []
+    for label, total, free, scanned in rows:
+        for g in groups:
+            if g["total"] == total and abs(g["free"] - free) <= _SAME_VOLUME_SLACK:
+                g["labels"].append(label)
+                g["free"] = min(g["free"], free)
+                g["scanned"] = min(g["scanned"] or 0, scanned or 0) or g["scanned"]
+                break
+        else:
+            groups.append({"labels": [label], "total": total, "free": free,
+                           "scanned": scanned})
+    by_label = {}
+    for i, g in enumerate(groups):
+        g["id"] = i
+        g["name"] = " + ".join(sorted(g["labels"]))
+        for label in g["labels"]:
+            by_label[label] = i
+    return groups, by_label
+
+
+RECLAIM_MIN_MOVE = 1073741824      # ต่ำกว่า 1GB ไม่คุ้มค่าที่จะสั่งให้คนไปลากย้าย
+
+
+def reclaim_move_plan(conn, target_free=RECLAIM_TARGET_FREE, min_years=1.0,
+                      max_moves_per_drive=6):
+    """เสนอว่าไดรฟ์ที่ใกล้เต็มควรย้ายโฟลเดอร์ไหนไปไดรฟ์ไหน
+
+    - คิดเป็น "ลูก" ไม่ใช่ "label": Mac-Desktop/Documents/Pictures/... คือ SSD ลูกเดียว
+      ถ้าคิดแยกจะกลายเป็นขอที่ว่างซ้ำห้ารอบจากดิสก์ก้อนเดียวกัน
+    - ผู้รับต้องไม่ใช่ลูกเดียวกับต้นทาง และรับแล้วตัวเองต้องยังเหลือ target_free
+    - เลือกเฉพาะโฟลเดอร์ที่นิ่งแล้ว (ไฟล์ใหม่สุดเก่ากว่า min_years ปี) จะได้ไม่ไปยุ่งกับงานที่ยังทำอยู่
+      และต้องใหญ่พอควรค่าแก่การย้าย (>= 1GB)
+    - ถ้าไม่พอ บอกตรง ๆ ว่าขาดเท่าไหร่ **และเพราะอะไร** (ไม่มีของให้ย้าย vs ปลายทางเต็ม)
+    """
+    now = time.time()
+    cutoff = now - min_years * YEAR_SECONDS
+    groups, _by_label = reclaim_volume_groups(conn)
+
+    # ที่ว่างที่แต่ละลูกยัง "แจกได้" โดยไม่ทำให้ตัวเองต่ำกว่าเป้า
+    budget = {g["id"]: max(0, g["free"] - g["total"] * target_free) for g in groups}
+
+    sources = [dict(g, need=g["total"] * target_free - g["free"],
+                    pct=g["free"] / g["total"] * 100)
+               for g in groups if g["free"] < g["total"] * target_free]
+    sources.sort(key=lambda s: s["pct"])          # ลูกที่ตึงสุดได้เลือกก่อน
+
+    plans = []
+    for s in sources:
+        placeholders = ",".join("?" * len(s["labels"]))
+        # ขนาดต้องเป็นขนาด "ทั้งโฟลเดอร์" เพราะเวลาย้ายจริงมันย้ายไปทั้งก้อน - ถ้าไป SUM
+        # เฉพาะไฟล์ที่ mtime ปกติ ตัวเลขจะต่ำกว่าจริง (เจอเคสต่างกัน ~5GB) แล้วปลายทางล้นได้
+        # ส่วนการตัดสินว่า "เก่าแล้วหรือยัง" ใช้เฉพาะ mtime ที่เชื่อได้
+        rows = conn.execute(
+            "SELECT drive_label, depth1, COUNT(*), SUM(size), "
+            "       MAX(CASE WHEN mtime BETWEEN ? AND ? THEN mtime END) AS newest "
+            "FROM files WHERE drive_label IN (" + placeholders + ") AND depth1 <> '' "
+            "GROUP BY drive_label, depth1 "
+            "HAVING newest IS NOT NULL AND newest < ? AND SUM(size) >= ? "
+            "ORDER BY SUM(size) DESC LIMIT 60",
+            [MTIME_FLOOR, now + 86400] + list(s["labels"]) + [cutoff, RECLAIM_MIN_MOVE]
+        ).fetchall()
+
+        remaining = s["need"]
+        moves = []
+        blocked_by_space = False
+        for label, folder, nfiles, size, newest in rows:
+            if remaining <= 0 or len(moves) >= max_moves_per_drive:
+                break
+            # อย่าย้ายก้อนที่ใหญ่เกินความจำเป็นมาก - กินที่ปลายทางที่ไดรฟ์ลูกอื่นยังต้องใช้
+            if size > remaining * 1.5 and any(
+                    r[3] <= remaining * 1.5 for r in rows if r[3] >= RECLAIM_MIN_MOVE):
+                continue
+            dest = max((g for g in groups if g["id"] != s["id"]),
+                       key=lambda g: budget[g["id"]], default=None)
+            if dest is None or budget[dest["id"]] < size:
+                blocked_by_space = True
+                continue
+            budget[dest["id"]] -= size
+            remaining -= size
+            moves.append({"from": label, "folder": folder, "files": nfiles, "size": size,
+                          "size_human": human_size(size), "to": dest["name"],
+                          "mdate": _safe_date(newest),
+                          "years": round((now - newest) / YEAR_SECONDS, 1)})
+
+        # ปิดท้าย: ยังขาดอยู่ และยังมีก้อนที่ยังไม่ได้ใช้ซึ่งปิดจบได้ - หยิบก้อนที่เล็กที่สุด
+        # ที่พอ ดีกว่าปล่อยให้แผนค้างไว้ทั้งที่ทำให้จบได้
+        if remaining > 0 and len(moves) < max_moves_per_drive:
+            used = {(m["from"], m["folder"]) for m in moves}
+            spare = [r for r in rows if (r[0], r[1]) not in used]
+            fits = [r for r in spare if r[3] >= remaining] or spare
+            fits.sort(key=lambda r: r[3])         # เล็กสุดที่ยังพอปิดจบ
+            for label, folder, nfiles, size, newest in fits:
+                dest = max((g for g in groups if g["id"] != s["id"]),
+                           key=lambda g: budget[g["id"]], default=None)
+                if dest is None or budget[dest["id"]] < size:
+                    blocked_by_space = True
+                    continue
+                budget[dest["id"]] -= size
+                remaining -= size
+                moves.append({"from": label, "folder": folder, "files": nfiles, "size": size,
+                              "size_human": human_size(size), "to": dest["name"],
+                              "mdate": _safe_date(newest),
+                              "years": round((now - newest) / YEAR_SECONDS, 1)})
+                break
+
+        moved = sum(m["size"] for m in moves)
+        short = max(0, s["need"] - moved)
+        if not short:
+            reason = None
+        elif not rows:
+            reason = "ไม่มีโฟลเดอร์เก่าพอจะย้าย (งานบนไดรฟ์นี้ยังใหม่อยู่)"
+        elif blocked_by_space:
+            reason = "ปลายทางไม่มีที่ว่างพอแล้ว - ต้องหาไดรฟ์เพิ่ม หรือลบทิ้งแทน"
+        else:
+            reason = "ย้ายได้เท่าที่มีโฟลเดอร์เก่าให้ย้าย (ที่เหลือเป็นงานที่ยังใหม่)"
+        plans.append({
+            "drive": " + ".join(sorted(s["labels"])), "labels": s["labels"],
+            "total_human": human_size(s["total"]),
+            "free_before_human": human_size(s["free"]),
+            "pct_before": round(s["pct"], 1),
+            "pct_after": round((s["free"] + moved) / s["total"] * 100, 1),
+            "need_human": human_size(s["need"]),
+            "moved": moved, "moved_human": human_size(moved),
+            "short": short, "short_human": human_size(short), "reason": reason,
+            "scanned_days": round((now - s["scanned"]) / 86400) if s.get("scanned") else None,
+            "moves": moves})
+
+    destinations = [{"name": g["name"], "free_human": human_size(g["free"]),
+                     "left_human": human_size(budget[g["id"]]), "labels": g["labels"]}
+                    for g in groups if budget[g["id"]] > 0]
+    destinations.sort(key=lambda d: d["name"])
+    return {"target_pct": round(target_free * 100), "plans": plans,
+            "destinations": destinations,
+            "total_moved_human": human_size(sum(p["moved"] for p in plans)),
+            "total_short": sum(p["short"] for p in plans),
+            "total_short_human": human_size(sum(p["short"] for p in plans))}
+
+
+def reclaim_consolidate(conn, min_side=1073741824, limit=15):
+    """งานชื่อเดียวกันที่กระจายอยู่หลายไดรฟ์ - แยกให้ออกว่าเป็น 'สำเนาซ้ำ' (ลบฝั่งหนึ่งได้เลย)
+    หรือ 'งานถูกแบ่ง' (ควรรวมไว้ลูกเดียว) ด้วยการดูว่าไฟล์ (ชื่อ+ขนาด) ซ้อนทับกันกี่ %
+    ของฝั่งที่เล็กกว่า. min_side กันเคสกวนใจที่อีกฝั่งเป็นแค่ไฟล์งานไม่กี่ตัวบนเครื่อง"""
+    def build():
+        cands = conn.execute(
+            "SELECT depth1, SUM(size) FROM files WHERE depth1 <> '' GROUP BY depth1 "
+            "HAVING COUNT(DISTINCT drive_label) > 1 AND SUM(size) > ? "
+            "ORDER BY SUM(size) DESC LIMIT ?", (min_side * 4, limit * 3)).fetchall()
+        out = []
+        for folder, total in cands:
+            sides = conn.execute(
+                "SELECT drive_label, COUNT(*), SUM(size) FROM files WHERE depth1 = ? "
+                "GROUP BY drive_label ORDER BY SUM(size) DESC", (folder,)).fetchall()
+            # ฝั่งเล็กต้องใหญ่พอจะมีความหมาย ทั้งแบบสัมบูรณ์และเทียบกับฝั่งใหญ่ -
+            # ไม่งั้นโฟลเดอร์ทำงานไม่กี่ไฟล์บนเครื่องจะถูกรายงานว่าเป็น "งานถูกแบ่ง"
+            if len(sides) < 2 or sides[1][2] < max(min_side, sides[0][2] * 0.05):
+                continue
+            a, b = sides[0][0], sides[1][0]
+            overlap = conn.execute(
+                "SELECT COALESCE(SUM(sz), 0) FROM ("
+                " SELECT filename fn, size sz FROM files WHERE depth1=? AND drive_label=?"
+                " INTERSECT"
+                " SELECT filename, size FROM files WHERE depth1=? AND drive_label=?)",
+                (folder, a, folder, b)).fetchone()[0]
+            smaller = sides[1][2]
+            ratio = (overlap / smaller * 100) if smaller else 0
+            if ratio >= 80:
+                verdict, advice = "copy", "สำเนาซ้ำเกือบทั้งก้อน - เก็บไว้ลูกเดียวก็พอ"
+            elif ratio >= 20:
+                verdict, advice = "partial", "ซ้ำกันบางส่วน - ตรวจก่อนว่าฝั่งไหนครบกว่า"
+            else:
+                verdict, advice = "split", "งานถูกแบ่งคนละไดรฟ์ - รวมไว้ลูกเดียวจะหาง่ายกว่า"
+            out.append({"folder": folder, "total": total, "total_human": human_size(total),
+                        "verdict": verdict, "advice": advice,
+                        "overlap": overlap, "overlap_human": human_size(overlap),
+                        "overlap_pct": round(ratio),
+                        "sides": [{"drive": d, "files": n, "size": s,
+                                   "size_human": human_size(s)} for d, n, s in sides]})
+            if len(out) >= limit:
+                break
+        out.sort(key=lambda x: -(x["overlap"] if x["verdict"] == "copy" else 0))
+        return out
+    return _cached(conn, "consolidate", build)
+
+
+def reclaim_move_markdown(plan):
+    lines = ["# แผนย้ายของ", "",
+             "> ย้ายเองด้วยมือ แล้ว **สแกนใหม่ทั้งไดรฟ์ต้นทางและปลายทาง** ไม่งั้นแคตตาล็อกจะยังจำที่เดิม", "",
+             "สร้างโดย HDDCAT %s · %s" % (__version__, time.strftime("%Y-%m-%d %H:%M")),
+             "เป้าหมาย: ทุกไดรฟ์เหลือที่ว่างอย่างน้อย %d%%" % plan["target_pct"], ""]
+    for p in plan["plans"]:
+        lines += ["## %s — ว่าง %s%% → %s%%" % (p["drive"], p["pct_before"], p["pct_after"]), ""]
+        if not p["moves"]:
+            lines += ["- ⚠️ ยังขาดอีก %s — %s" % (p["short_human"], p["reason"]), ""]
+            continue
+        for m in p["moves"]:
+            note = "ไฟล์ใหม่สุด %s" % (m["mdate"] or "?")
+            lines.append("- [ ] `%s` (%s, %s ไฟล์) → **%s**  _(%s)_"
+                         % (m["folder"], m["size_human"], format(m["files"], ","),
+                            m["to"], note))
+        if p["short"]:
+            lines.append("- ⚠️ ยังขาดอีก %s — %s" % (p["short_human"], p["reason"]))
+        lines.append("")
+    lines += ["---", "ที่ว่างที่ใช้คำนวณเป็นค่าจากตอนสแกนล่าสุด ไม่ใช่ค่าสด"]
+    return "\n".join(lines) + "\n"
+
+
 def reclaim_markdown(title, rows, note=""):
     """Markdown checklist - tick items off while deleting by hand, and it drops
     straight into Obsidian next to the export-obsidian notes."""
@@ -1127,7 +1351,8 @@ def reclaim_markdown(title, rows, note=""):
 
 def cmd_reclaim(args):
     conn = get_conn(args.db)
-    if args.junk or not (args.big_old or args.by_type):
+    if args.junk or not (args.big_old or args.by_type or args.move_plan
+                          or args.consolidate):
         print("=== ของที่ลบได้ (cache/ไฟล์ขยะ) ===")
         total = 0
         for r in reclaim_junk_summary(conn):
@@ -1159,6 +1384,34 @@ def cmd_reclaim(args):
         for r in reclaim_by_type(conn)["total"]:
             print("  %-22s %9s ไฟล์  %9s"
                   % (r["label"], format(r["files"], ","), r["bytes_human"]))
+        print()
+    if args.move_plan:
+        plan = reclaim_move_plan(conn, target_free=args.target_free / 100.0)
+        print("=== แผนย้ายของ (เป้าหมาย: ทุกไดรฟ์ว่าง >= %d%%) ===" % plan["target_pct"])
+        for p in plan["plans"]:
+            if not p["moves"] and not p["short"]:
+                continue
+            print("  [%s] ว่าง %s%% -> %s%% (ต้องเคลียร์ %s)"
+                  % (p["drive"], p["pct_before"], p["pct_after"], p["need_human"]))
+            for m in p["moves"]:
+                print("     ย้าย %s (%s) -> %s" % (m["folder"], m["size_human"], m["to"]))
+            if p["short"]:
+                print("     ! ยังขาดอีก %s - %s" % (p["short_human"], p["reason"]))
+        print("  รวมย้ายได้ %s%s\n"
+              % (plan["total_moved_human"],
+                 (" · ยังไม่มีที่ไป " + plan["total_short_human"])
+                 if plan["total_short_human"] not in ("0B", "0.0B") else ""))
+        if args.md:
+            with open(args.md, "w", encoding="utf-8") as f:
+                f.write(reclaim_move_markdown(plan))
+            print("  เขียนแผนไปที่ %s" % args.md)
+    if args.consolidate:
+        print("=== งานเดียวกันอยู่หลายไดรฟ์ ===")
+        for r in reclaim_consolidate(conn):
+            print("  %s (%s) - ซ้อนทับ %s%% -> %s"
+                  % (r["folder"], r["total_human"], r["overlap_pct"], r["advice"]))
+            for s in r["sides"][:3]:
+                print("     [%s] %s ไฟล์ %s" % (s["drive"], format(s["files"], ","), s["size_human"]))
         print()
     bad = reclaim_bad_mtime(conn)
     if bad["files"]:
@@ -2066,7 +2319,7 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
 .rc-detail { padding: 0 18px 16px; }
 .rc-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0 0; }
 .rc-actions .btn { padding: 8px 18px; font-size: 13px; }
-.rc-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .rc-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
   margin-bottom: 12px; }
 .rc-filters select, .rc-filters input { font-family: inherit; font-size: 13.5px;
@@ -2095,6 +2348,37 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
   border: 1px solid rgba(255, 143, 60, .3); border-radius: 10px; padding: 11px 15px;
   line-height: 1.7; margin-bottom: 16px; }
 .rc-copied { font-size: 12.5px; color: var(--color-success); align-self: center; }
+
+.rc-plan { border-top: 1px solid rgba(5,1,28,.06); padding: 14px 18px; }
+.rc-plan:first-child { border-top: none; }
+.rc-plan-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 8px; }
+.rc-plan-drive { font-family: var(--font-primary); font-weight: var(--p-semi-bold);
+  font-size: 14.5px; color: var(--color-heading-1); }
+.rc-plan-pct { font-size: 12.5px; color: var(--counter-title); }
+.rc-plan-pct b { color: var(--color-success); font-weight: var(--p-semi-bold); }
+.rc-move { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+  font-size: 13px; flex-wrap: wrap; }
+.rc-move-folder { flex: 1; min-width: 220px; color: var(--color-title);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-move-size { font-weight: var(--p-semi-bold); color: var(--color-heading-1);
+  white-space: nowrap; }
+.rc-move-to { font-size: 12px; color: var(--color-primary); background: rgba(102,51,238,.09);
+  border-radius: 20px; padding: 3px 10px; white-space: nowrap; }
+.rc-move-when { font-size: 12px; color: var(--counter-title); white-space: nowrap; }
+.rc-short { font-size: 12.5px; color: #9a5b00; background: rgba(255,143,60,.12);
+  border-radius: 8px; padding: 8px 12px; margin-top: 6px; }
+.rc-dest { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.rc-dest span { font-size: 12.5px; color: var(--counter-title);
+  border: 1px solid var(--color-border); border-radius: 20px; padding: 5px 12px;
+  background: var(--color-white); }
+.rc-dest b { color: var(--color-heading-1); }
+.rc-verdict { font-size: 11px; font-weight: var(--p-semi-bold); border-radius: 20px;
+  padding: 3px 10px; white-space: nowrap; }
+.rc-verdict.copy { color: #0f7b33; background: rgba(38,207,75,.14); }
+.rc-verdict.partial { color: #9a5b00; background: rgba(255,143,60,.16); }
+.rc-verdict.split { color: var(--color-primary); background: rgba(102,51,238,.09); }
+.rc-sides { font-size: 12.5px; color: var(--counter-title); margin-top: 4px; }
 
 /* ---- panels (scan / dedup) ---- */
 
@@ -2406,7 +2690,38 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
     <div class="rc-card" style="padding: 8px 18px 14px" id="rc-bytype"></div>
   </div>
 
-  <!-- 4. duplicates (moved in from the old tab) -->
+  <!-- 4. move plan (Phase 3) -->
+  <div class="rc-sec">
+    <h2>แผนย้ายของ</h2>
+    <p class="desc">ไดรฟ์ไหนใกล้เต็ม ควรย้ายงานเก่าก้อนไหนไปไดรฟ์ไหน — เลือกเฉพาะโฟลเดอร์ที่นิ่งแล้ว
+      (ไฟล์ใหม่สุดเก่ากว่า 1 ปี) จะได้ไม่ไปยุ่งกับงานที่ยังทำอยู่
+      <br>⚠️ ที่ว่างที่ใช้คำนวณเป็นค่า<b>จากตอนสแกนล่าสุด ไม่ใช่ค่าสด</b> · ย้ายเสร็จแล้วต้อง
+      <b>สแกนใหม่ทั้งไดรฟ์ต้นทางและปลายทาง</b> ไม่งั้นแคตตาล็อกจะยังจำที่เดิม</p>
+    <div class="rc-filters">
+      <label>อยากให้ทุกไดรฟ์เหลือที่ว่างอย่างน้อย</label>
+      <select id="rc-target">
+        <option value="10">10%</option>
+        <option value="15" selected>15%</option>
+        <option value="20">20%</option>
+        <option value="25">25%</option>
+      </select>
+      <a class="btn btn-border" id="rc-plan-dl" href="/api/reclaim/export?kind=moveplan&target=15"
+         download>ดาวน์โหลดแผน (.md)</a>
+    </div>
+    <div id="rc-moveplan"></div>
+  </div>
+
+  <!-- 5. consolidate -->
+  <div class="rc-sec">
+    <h2>งานเดียวกันอยู่หลายไดรฟ์</h2>
+    <p class="desc">โฟลเดอร์งานชื่อเดียวกันที่อยู่หลายไดรฟ์ — ดูให้ว่าเป็น
+      <b>สำเนาซ้ำ</b> (เก็บลูกเดียวพอ) หรือ <b>งานถูกแบ่ง</b> (ควรรวมไว้ลูกเดียว)
+      โดยเทียบว่าไฟล์ข้างในซ้อนทับกันกี่ %</p>
+    <button class="btn btn-border" id="rc-consol-btn">ตรวจหา (ใช้เวลาสักครู่)</button>
+    <div id="rc-consol"></div>
+  </div>
+
+  <!-- 6. duplicates (moved in from the old tab) -->
   <div class="rc-sec">
     <h2>ไฟล์ซ้ำข้ามไดรฟ์</h2>
     <p class="desc">เทียบจากชื่อไฟล์ + ขนาดที่ตรงกันเป๊ะใน catalog (ไม่ได้อ่านเนื้อไฟล์
@@ -3065,7 +3380,83 @@ function ensureReclaimLoaded() {
   reclaimLoaded = true;
   loadReclaimSummary();
   loadBigOld();
+  loadMovePlan();
 }
+
+/* --- แผนย้ายของ (Phase 3) --- */
+async function loadMovePlan() {
+  const box = $("rc-moveplan");
+  const target = $("rc-target").value;
+  $("rc-plan-dl").href = `/api/reclaim/export?kind=moveplan&target=${target}`;
+  box.innerHTML = `<div class="hint">${CAT_SM} กำลังวางแผน…</div>`;
+  const res = await api(`/api/reclaim/moveplan?target=${target}`);
+  if (!res.ok) { box.innerHTML = `<div class="hint">โหลดไม่สำเร็จ</div>`; return; }
+  if (!res.plans.length) {
+    box.innerHTML = `<div class="rc-card"><div class="home-note" style="padding:16px">
+      ทุกไดรฟ์เหลือที่ว่างเกิน ${res.target_pct}% แล้ว ไม่ต้องย้ายอะไร 🎉</div></div>`;
+    return;
+  }
+  const dest = res.destinations.map(d =>
+    `<span>ปลายทาง <b>${esc(d.name)}</b> · ว่าง ${esc(d.free_human)} (รับเพิ่มได้ ${esc(d.left_human)})</span>`).join("");
+  box.innerHTML = `
+    <div class="dedup-head">ย้ายรวม <span class="save">${esc(res.total_moved_human)}</span>${
+      res.total_short ? ` · ยังไม่มีที่ไป ${esc(res.total_short_human)}` : ""}</div>
+    <div class="rc-dest">${dest || '<span>ไม่มีไดรฟ์ไหนว่างพอจะรับของ</span>'}</div>
+    <div class="rc-card">
+      ${res.plans.map(p => `
+        <div class="rc-plan">
+          <div class="rc-plan-head">
+            <span class="rc-plan-drive">${esc(p.drive)}</span>
+            <span class="rc-plan-pct">ว่าง ${p.pct_before}% → <b>${p.pct_after}%</b>
+              · ต้องเคลียร์ ${esc(p.need_human)}${
+              p.scanned_days != null ? ` · สแกนเมื่อ ${p.scanned_days} วันก่อน` : ""}</span>
+          </div>
+          ${p.moves.map(m => `
+            <div class="rc-move">
+              <span class="rc-move-folder" title="${esc(m.folder)}">${esc(m.folder)}</span>
+              <span class="rc-move-when">ไฟล์ใหม่สุด ${m.mdate ? esc(m.mdate) : "?"}</span>
+              <span class="rc-move-size">${esc(m.size_human)}</span>
+              <span class="rc-move-to">→ ${esc(m.to)}</span>
+            </div>`).join("")}
+          ${p.short ? `<div class="rc-short">ยังขาดอีก ${esc(p.short_human)} — ${esc(p.reason)}</div>` : ""}
+        </div>`).join("")}
+    </div>`;
+}
+$("rc-target").addEventListener("change", loadMovePlan);
+
+/* --- งานเดียวกันอยู่หลายไดรฟ์ (ยิงเมื่อกด เพราะต้องเทียบไฟล์ทีละก้อน ~5-7 วิ) --- */
+$("rc-consol-btn").addEventListener("click", async () => {
+  const box = $("rc-consol"), btn = $("rc-consol-btn");
+  btn.disabled = true;
+  box.innerHTML = `<div class="hint" style="margin-top:12px">${CAT_SM} กำลังเทียบไฟล์ในแต่ละโฟลเดอร์…</div>`;
+  const res = await api("/api/reclaim/consolidate");
+  btn.disabled = false;
+  if (!res.ok) { box.innerHTML = `<div class="hint">โหลดไม่สำเร็จ</div>`; return; }
+  if (!res.rows.length) {
+    box.innerHTML = `<div class="home-note">ไม่เจองานที่ชื่อซ้ำกันข้ามไดรฟ์แบบมีนัยสำคัญ</div>`;
+    return;
+  }
+  const dup = res.rows.filter(r => r.verdict === "copy");
+  const gain = dup.reduce((s, r) => s + r.overlap, 0);
+  const label = {copy: "สำเนาซ้ำ", partial: "ซ้ำบางส่วน", split: "งานถูกแบ่ง"};
+  box.innerHTML = `
+    <div class="dedup-head" style="margin-top:14px">${res.rows.length} งาน${
+      dup.length ? ` · เป็นสำเนาซ้ำ ${dup.length} งาน คืนได้ <span class="save">~${human(gain)}</span>` : ""}</div>
+    <div class="rc-card">
+      ${res.rows.map(r => `
+        <div class="rc-plan">
+          <div class="rc-plan-head">
+            <span class="rc-verdict ${esc(r.verdict)}">${label[r.verdict] || ""}</span>
+            <span class="rc-plan-drive">${esc(r.folder)}</span>
+            <span class="rc-plan-pct">${esc(r.total_human)} · ซ้อนทับ ${r.overlap_pct}%</span>
+          </div>
+          <div class="rc-sides">${r.sides.slice(0, 3).map(s =>
+            `<span class="badge drive">${esc(s.drive)}</span> ${s.files.toLocaleString()} ไฟล์ ${esc(s.size_human)}`
+            ).join(" &nbsp;·&nbsp; ")}</div>
+          <div class="rc-sides">${esc(r.advice)}</div>
+        </div>`).join("")}
+    </div>`;
+});
 
 /* ---------- dedup ---------- */
 
@@ -3432,8 +3823,33 @@ def cmd_serve(args):
                     total = reclaim_bigold_total(conn, min_bytes, years, drive=drive, mode=mode)
                     conn.close()
                     self._json({"ok": True, "rows": rows, "total": total})
+                elif route == "/api/reclaim/moveplan":
+                    conn = get_conn(db_path)
+                    payload = reclaim_move_plan(
+                        conn, target_free=float(q.get("target", ["15"])[0]) / 100.0)
+                    conn.close()
+                    payload["ok"] = True
+                    self._json(payload)
+                elif route == "/api/reclaim/consolidate":
+                    conn = get_conn(db_path)
+                    rows = reclaim_consolidate(conn)
+                    conn.close()
+                    self._json({"ok": True, "rows": rows})
                 elif route == "/api/reclaim/export":
                     conn = get_conn(db_path)
+                    if q.get("kind", ["bigold"])[0] == "moveplan":
+                        plan = reclaim_move_plan(
+                            conn, target_free=float(q.get("target", ["15"])[0]) / 100.0)
+                        conn.close()
+                        data = reclaim_move_markdown(plan).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                        self.send_header("Content-Disposition",
+                                         'attachment; filename="hddcat-move-plan.md"')
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
                     if q.get("kind", ["bigold"])[0] == "junk":
                         rule_id = q.get("rule", [""])[0]
                         rule = _RULES_BY_ID.get(rule_id)
@@ -3727,6 +4143,12 @@ def main():
     sp.add_argument("--years", type=float, default=3.0, help="(--big-old) ไม่ถูกแตะกี่ปี")
     sp.add_argument("--limit", type=int, default=100)
     sp.add_argument("--md", help="(--big-old) เขียน checklist Markdown ออกไฟล์")
+    sp.add_argument("--move-plan", action="store_true",
+                     help="เสนอแผนย้ายของจากไดรฟ์ที่ใกล้เต็มไปไดรฟ์ที่ยังว่าง")
+    sp.add_argument("--consolidate", action="store_true",
+                     help="งานชื่อเดียวกันที่กระจายอยู่หลายไดรฟ์")
+    sp.add_argument("--target-free", type=float, default=15.0,
+                     help="(--move-plan) อยากให้ทุกไดรฟ์เหลือที่ว่างกี่ % (default 15)")
     sp.set_defaults(func=cmd_reclaim)
 
     sp = sub.add_parser("forget", help="ลบ drive ออกจาก catalog (ลบแค่ข้อมูลใน DB ไม่แตะไฟล์จริง)")
