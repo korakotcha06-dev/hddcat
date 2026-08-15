@@ -307,9 +307,51 @@ def locate_on_drive(conn, label, relpath=""):
     return {"ok": True, "mount": mount, "path": target, "exact": exact}
 
 
+_TRANSLATED = None
+
+
+def running_translated():
+    """True when this process is running under Rosetta. Worth knowing: `open`
+    called from a translated process never returns from LaunchServices, so the
+    reveal silently does nothing. Better to say so than to claim success."""
+    global _TRANSLATED
+    if _TRANSLATED is None:
+        _TRANSLATED = False
+        if sys.platform == "darwin":
+            try:
+                out = subprocess.run(["sysctl", "-n", "sysctl.proc_translated"],
+                                     capture_output=True, text=True, timeout=5)
+                _TRANSLATED = out.stdout.strip() == "1"
+            except Exception:
+                pass
+    return _TRANSLATED
+
+
+ROSETTA_HINT = ("HDDCAT กำลังรันใต้ Rosetta เลยสั่งเปิด Finder ไม่ได้ — ปิดก่อน: "
+                "คลิกขวา HDDCAT.app ใน Applications > Get Info แล้วเอาติ๊ก "
+                '"Open using Rosetta" ออก จากนั้นเปิดแอปใหม่')
+
+
+def _reap_later(proc, seconds=30):
+    """Wait on a fire-and-forget child off the caller's thread, so it can't sit
+    around as a zombie - and give up if it never finishes."""
+    def wait():
+        try:
+            proc.wait(timeout=seconds)
+        except Exception:
+            pass
+    threading.Thread(target=wait, daemon=True).start()
+
+
 def reveal_in_file_manager(target):
     """Show `target` in the desktop file manager: a folder opens, a file opens
-    its folder with the file selected. Returns the command that was run."""
+    its folder with the file selected. Returns the command that was started.
+
+    Deliberately does NOT wait for it. Launched from inside HDDCAT.app, `open`
+    can sit in LaunchServices indefinitely without returning; waiting on that
+    hangs the HTTP request forever and leaks a stuck child on every click. The
+    path was already checked before we get here, so there is no exit status
+    worth blocking a request for."""
     is_file = os.path.isfile(target)
     if sys.platform == "darwin":
         cmd = ["open", "-R", target] if is_file else ["open", target]
@@ -317,8 +359,8 @@ def reveal_in_file_manager(target):
         cmd = ["explorer", f"/select,{target}"] if is_file else ["explorer", target]
     else:
         cmd = ["xdg-open", os.path.dirname(target) if is_file else target]
-    subprocess.run(cmd, check=False,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _reap_later(subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True))
     return cmd
 
 
@@ -1157,6 +1199,8 @@ def cmd_open(args):
             print(f"ถ้าเสียบอยู่แล้วแต่ยังหาไม่เจอ บอก path ให้รู้ด้วย: "
                   f"python3 catalog.py open {args.label} --set-path /Volumes/...")
         sys.exit(1)
+    if running_translated():
+        print("WARNING: " + ROSETTA_HINT)
     if not loc["exact"]:
         print("ไม่เจอ path นั้นแล้ว (ย้าย/เปลี่ยนชื่อไปหรือเปล่า) - เปิดโฟลเดอร์แม่ที่ใกล้ที่สุดแทน")
     print(f"เปิด {loc['path']}")
@@ -3548,6 +3592,10 @@ def cmd_serve(args):
                     rel = body.get("relpath")
                     if rel is None:
                         rel = folder_to_relpath(body.get("folder") or "")
+                    if running_translated():
+                        self._json({"ok": False, "reason": "rosetta",
+                                    "error": ROSETTA_HINT}, 409)
+                        return
                     conn = get_conn(db_path)
                     loc = locate_on_drive(conn, label, rel)
                     conn.close()
