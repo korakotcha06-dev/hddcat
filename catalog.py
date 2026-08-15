@@ -35,7 +35,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.2.0"
+__version__ = "1.4.0"
 
 import argparse
 import json
