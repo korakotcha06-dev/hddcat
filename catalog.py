@@ -85,12 +85,15 @@ def get_conn(db_path):
         PRIMARY KEY (drive_label, relpath)
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS drives (
-        drive_label TEXT PRIMARY KEY, total_bytes INTEGER, free_bytes INTEGER, last_scanned REAL,
-        mount_path TEXT
+        drive_label TEXT PRIMARY KEY, total_bytes INTEGER, free_bytes INTEGER, last_scanned REAL
     )""")
-    # catalogs made before "go to folder" have no mount_path column
-    if "mount_path" not in {r[1] for r in conn.execute("PRAGMA table_info(drives)")}:
-        conn.execute("ALTER TABLE drives ADD COLUMN mount_path TEXT")
+    # where each drive was last seen, for "go to folder". Deliberately its own
+    # table and not a column on drives: an older HDDCAT writes that row with a
+    # positional INSERT ... VALUES (?,?,?,?), which an extra column would break
+    # for anyone who runs a previous version against this catalog.
+    conn.execute("""CREATE TABLE IF NOT EXISTS drive_paths (
+        drive_label TEXT PRIMARY KEY, mount_path TEXT
+    )""")
     return conn
 
 
@@ -133,12 +136,11 @@ def scan_drive(db_path, drive_path, label, progress=None):
         disk_total, disk_free = usage.total, usage.free
     except OSError:
         disk_total, disk_free = None, None
+    conn.execute("INSERT OR REPLACE INTO drives VALUES (?,?,?,?)",
+                 (label, disk_total, disk_free, time.time()))
     # remember where the drive was mounted so "go to folder" can jump straight
     # there next time it is plugged in
-    conn.execute("INSERT OR REPLACE INTO drives "
-                 "(drive_label, total_bytes, free_bytes, last_scanned, mount_path) "
-                 "VALUES (?,?,?,?,?)",
-                 (label, disk_total, disk_free, time.time(), drive_path))
+    conn.execute("INSERT OR REPLACE INTO drive_paths VALUES (?,?)", (label, drive_path))
     conn.commit()
     conn.close()
     return {"files": count, "bytes": total_bytes, "seconds": time.time() - t0,
@@ -234,7 +236,8 @@ def resolve_drive_mount(conn, label):
     not plugged in. Tries the path seen at scan time first, then /Volumes/<label>
     (which is what older catalogs, scanned before mount_path existed, rely on)."""
     cands = []
-    row = conn.execute("SELECT mount_path FROM drives WHERE drive_label=?", (label,)).fetchone()
+    row = conn.execute("SELECT mount_path FROM drive_paths WHERE drive_label=?",
+                       (label,)).fetchone()
     if row and row[0]:
         cands.append(row[0])
     vol = os.path.join("/Volumes", label)
@@ -263,7 +266,7 @@ def remember_drive_mount(conn, label, path):
     tops = drive_top_entries(conn, label)
     if tops and not any(os.path.exists(os.path.join(path, t)) for t in tops):
         raise ValueError(f"{path} ไม่มีโฟลเดอร์ของไดรฟ์ '{label}' อยู่เลย — path ผิดลูกหรือเปล่า")
-    conn.execute("UPDATE drives SET mount_path=? WHERE drive_label=?", (path, label))
+    conn.execute("INSERT OR REPLACE INTO drive_paths VALUES (?,?)", (label, path))
     conn.commit()
     return path
 
@@ -740,6 +743,7 @@ def forget_drive(conn, label):
         return None
     conn.execute("DELETE FROM files WHERE drive_label=?", (label,))
     conn.execute("DELETE FROM drives WHERE drive_label=?", (label,))
+    conn.execute("DELETE FROM drive_paths WHERE drive_label=?", (label,))
     conn.commit()
     return n
 
