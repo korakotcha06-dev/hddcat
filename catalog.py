@@ -1245,12 +1245,15 @@ _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
 
 ## เปิดโฟลเดอร์จริงได้เลย ถ้าเสียบไดรฟ์อยู่
 
-ทุกแถวในคลังงาน (และในผลค้นหา) มีปุ่ม **เปิดโฟลเดอร์ / เปิด** — กดแล้วเด้ง Finder
+ทุกแถวในคลังงาน ผลค้นหา และแท็บ "เคลียร์พื้นที่" มีปุ่ม **เปิดโฟลเดอร์ / เปิด** — กดแล้วเด้ง Finder
 ไปที่ของจริงบนไดรฟ์ทันที ถ้ายังไม่ได้เสียบไดรฟ์ลูกนั้น ปุ่มจะเป็นสีเทากดไม่ได้
 และบอกว่าต้องเสียบลูกไหน
 
 ไดรฟ์ที่สแกนไว้ตั้งแต่ก่อนมีฟีเจอร์นี้ HDDCAT อาจยังไม่รู้ว่ามันอยู่ที่ไหน —
 ไปที่แท็บ "ไดรฟ์" กด **บอกที่อยู่ไดรฟ์** แล้วใส่ path ครั้งเดียว (ไม่ต้องสแกนใหม่)
+
+ปุ่ม "คัดลอก path ทั้งก้อน" ในหน้าเคลียร์พื้นที่ ถ้าไดรฟ์เสียบอยู่จะได้ path เต็มที่เอาไป
+วางใน Terminal ได้เลย ถ้าไม่ได้เสียบก็ยังได้ `[ชื่อไดรฟ์] path` แบบเดิม
 
 ---
 MIT License · © 2026 [Touchnewmedia Co., Ltd.](https://www.thetnm.com)
@@ -2923,8 +2926,15 @@ async function copyLines(lines, btn) {
   }
 }
 
+/* A path you can actually paste. For a drive that is plugged in right now that
+   means the real absolute path; for one sitting on a shelf the drive label is
+   the only useful thing we can say. */
 function rcPathLines(rows) {
-  return rows.map(r => `[${r.drive}] ${r.path || r.relpath}`);
+  return rows.map(r => {
+    const rel = r.path || r.relpath;
+    const mount = MOUNTED[r.drive];
+    return mount ? mount.replace(/\/$/, "") + "/" + rel : `[${r.drive}] ${rel}`;
+  });
 }
 
 function rcRowsTable(rows, withDup) {
@@ -2937,6 +2947,7 @@ function rcRowsTable(rows, withDup) {
       <td class="num muted">${r.files > 1 ? r.files.toLocaleString() + " ไฟล์" : ""}</td>
       <td class="num">${esc(r.size_human)}</td>
       <td class="num muted">${r.mdate ? esc(r.mdate) : "?"}</td>
+      <td class="num">${goBtn(r.drive, r.path || r.relpath, "เปิด", "tiny")}</td>
     </tr>`).join("")}
   </tbody></table></div>`;
 }
