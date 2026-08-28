@@ -16,6 +16,7 @@ USAGE
   python3 catalog.py reclaim --move-plan [--target-free 15] [--md แผน.md]
   python3 catalog.py open <drive_label> [relpath] [--set-path PATH]
   python3 catalog.py serve [--port 8765] [--no-browser]
+  python3 catalog.py mcp                      # MCP server (stdio) สำหรับ AI
   python3 catalog.py export-obsidian <vault_folder>
 
   Global option --db <path>  (default: catalog.db in current directory)
@@ -36,7 +37,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 import argparse
 import json
@@ -1458,6 +1459,320 @@ def cmd_open(args):
         print("ไม่เจอ path นั้นแล้ว (ย้าย/เปลี่ยนชื่อไปหรือเปล่า) - เปิดโฟลเดอร์แม่ที่ใกล้ที่สุดแทน")
     print(f"เปิด {loc['path']}")
     reveal_in_file_manager(loc["path"])
+
+
+# ------------------------------------------------------------------ MCP server
+# Exposes the catalog to an AI assistant over MCP (stdio). The point is that a
+# catalog is more useful asked than dumped: "which drive is tightest?" then
+# "what's old on it?" then "where should it go?" - a static JSON export answers
+# only the questions you thought of while writing it.
+#
+# Read-only by design. scan/forget are NOT exposed: one mutates for minutes,
+# the other deletes catalog rows. `reveal` is the single side effect and it
+# only opens a Finder window.
+#
+# stdio transport = newline-delimited JSON-RPC 2.0. NOTHING may print to stdout
+# except protocol messages - diagnostics go to stderr.
+
+MCP_PROTOCOL_VERSION = "2025-06-18"
+
+MCP_TOOLS = [
+    {
+        "name": "list_drives",
+        "description": "ทุกไดรฟ์ใน catalog พร้อมพื้นที่ว่าง/ความจุ จำนวนไฟล์ และวันที่สแกนล่าสุด "
+                       "ใช้ได้แม้ไม่ได้เสียบไดรฟ์ ฟิลด์ plugged_in บอกว่าลูกไหนเข้าถึงได้ตอนนี้ "
+                       "(free_pct น้อย = ตึง) เริ่มจากเครื่องมือนี้เสมอเมื่อถามเรื่องพื้นที่",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "search_files",
+        "description": "ค้นไฟล์ตามชื่อทั่วทุกไดรฟ์ ตอบว่าไฟล์อยู่ไดรฟ์ไหน path อะไร ขนาดเท่าไร "
+                       "ใช้ตอบ 'ไฟล์นี้อยู่ไหน' โดยไม่ต้องเสียบไดรฟ์",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "คำในชื่อไฟล์"},
+                "limit": {"type": "integer", "description": "จำนวนแถวสูงสุด (ค่าเริ่มต้น 50)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_projects",
+        "description": "โฟลเดอร์งานทั้งหมดพร้อมขนาด จำนวนไฟล์ ไดรฟ์ ชื่อ client และวันที่ของงาน "
+                       "ใช้ตอบ 'งานไหนกินที่เยอะสุด' หรือ 'ไดรฟ์นี้มีงานอะไรบ้าง' "
+                       "(สแกนทั้ง catalog ใช้เวลาไม่กี่วินาที)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "drive": {"type": "string", "description": "กรองเฉพาะไดรฟ์นี้ (label) เว้นว่าง = ทุกไดรฟ์"},
+                "sort": {"type": "string", "enum": ["size", "client"],
+                         "description": "size = ใหญ่ไปเล็ก (ค่าเริ่มต้น), client = จัดกลุ่มตาม client แล้ววันที่"},
+                "limit": {"type": "integer", "description": "จำนวนแถวสูงสุด (ค่าเริ่มต้น 40)"},
+            },
+        },
+    },
+    {
+        "name": "list_files_in_project",
+        "description": "ไฟล์ข้างในโฟลเดอร์งานหนึ่ง ใช้ดูว่างานก้อนนี้มีอะไรอยู่ก่อนตัดสินใจย้าย/ลบ",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "drive": {"type": "string"},
+                "folder": {"type": "string", "description": "path โฟลเดอร์ตามที่ list_projects คืนมา"},
+                "limit": {"type": "integer", "description": "ค่าเริ่มต้น 100"},
+            },
+            "required": ["drive", "folder"],
+        },
+    },
+    {
+        "name": "find_reclaimable",
+        "description": "cache/ไฟล์ขยะที่โปรแกรมสร้างใหม่ได้ (Premiere previews, .pek/.cfa, "
+                       "Lightroom previews, proxy, Auto-Save ฯลฯ) แยกเป็นกฎ ๆ พร้อมขนาดที่คืนได้ "
+                       "tier=safe คือลบได้ปลอดภัย tier=review คือควรดูก่อน "
+                       "ใส่ rule เพื่อขอรายชื่อไฟล์ของกฎนั้น",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rule": {"type": "string", "description": "id ของกฎ เว้นว่าง = สรุปทุกกฎ"},
+                "limit": {"type": "integer", "description": "จำนวนไฟล์เมื่อระบุ rule (ค่าเริ่มต้น 50)"},
+            },
+        },
+    },
+    {
+        "name": "find_archive_candidates",
+        "description": "งานใหญ่ที่ไม่ได้แตะมานาน — ผู้สมัครสำหรับ archive "
+                       "เรียงตามขนาด×อายุ เลือกได้ว่านับรายไฟล์หรือรายโฟลเดอร์งาน "
+                       "ตอบพร้อมยอดรวมจริงที่ไม่ติด limit",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "min_gb": {"type": "number", "description": "ขนาดขั้นต่ำ GB (ค่าเริ่มต้น 50 สำหรับโฟลเดอร์, 1 สำหรับไฟล์)"},
+                "years": {"type": "number", "description": "ไม่ถูกแตะมากี่ปี (ค่าเริ่มต้น 2)"},
+                "mode": {"type": "string", "enum": ["folder", "file"], "description": "ค่าเริ่มต้น folder"},
+                "drive": {"type": "string", "description": "กรองเฉพาะไดรฟ์นี้"},
+                "limit": {"type": "integer", "description": "ค่าเริ่มต้น 30"},
+            },
+        },
+    },
+    {
+        "name": "find_duplicate_projects",
+        "description": "งานชื่อเดียวกันที่อยู่หลายไดรฟ์ แยกให้ว่าเป็น 'สำเนาซ้ำ' (copy — ลบฝั่งหนึ่งได้) "
+                       "หรือ 'งานถูกแบ่ง' (split — ควรรวมไว้ลูกเดียว) โดยดูจาก % ที่ไฟล์ซ้อนทับกันจริง "
+                       "ไม่ได้เดาจากชื่อ · ใช้เวลาราว 5-7 วินาที",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "ค่าเริ่มต้น 15"}},
+        },
+    },
+    {
+        "name": "get_move_plan",
+        "description": "แผนย้ายของที่ HDDCAT คำนวณเอง: ไดรฟ์ที่ใกล้เต็มควรย้ายโฟลเดอร์ไหนไปไดรฟ์ไหน "
+                       "เพื่อให้ทุกลูกเหลือที่ว่างถึงเป้า · จับกลุ่มไดรฟ์ที่เป็นดิสก์ลูกเดียวกันก่อน "
+                       "(หลาย label อาจเป็น SSD ก้อนเดียว) และเช็คว่าปลายทางรับไหวจริง "
+                       "ใช้อันนี้เป็นฐานก่อนเสนอแผนเอง",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_free_pct": {"type": "number", "description": "เป้าที่ว่างต่อไดรฟ์ เป็น % (ค่าเริ่มต้น 15)"},
+            },
+        },
+    },
+    {
+        "name": "space_by_type",
+        "description": "พื้นที่หายไปกับไฟล์ชนิดไหน (วิดีโอ/ภาพ/RAW/เสียง/cache/…) แยกรายไดรฟ์และรวม",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"drive": {"type": "string", "description": "กรองเฉพาะไดรฟ์นี้"}},
+        },
+    },
+    {
+        "name": "reveal_in_finder",
+        "description": "เปิดโฟลเดอร์/ไฟล์จริงใน Finder — ทำได้เฉพาะตอนไดรฟ์ลูกนั้นเสียบอยู่ "
+                       "เป็นเครื่องมือเดียวในชุดนี้ที่มีผลข้างเคียง (แค่เปิดหน้าต่าง ไม่แตะไฟล์)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "drive": {"type": "string"},
+                "relpath": {"type": "string", "description": "path ในไดรฟ์ เว้นว่าง = รากไดรฟ์"},
+            },
+            "required": ["drive"],
+        },
+    },
+]
+
+
+def _mcp_drives(conn):
+    out = []
+    for d in drives_overview(conn):
+        total, free = d["total_bytes"], d["free_bytes"]
+        mount = resolve_drive_mount(conn, d["label"])
+        out.append({
+            "drive": d["label"],
+            "files": d["files"],
+            "cataloged_size": human_size(d["bytes"]),
+            "capacity": human_size(total) if total else None,
+            "free": human_size(free) if free is not None else None,
+            "free_pct": round(free / total * 100, 1) if total else None,
+            "last_scanned": time.strftime("%Y-%m-%d", time.localtime(d["last_scanned"]))
+                            if d["last_scanned"] else None,
+            "plugged_in": bool(mount),
+            "mounted_at": mount,
+        })
+    return {"drives": out,
+            "note": "ข้อมูลมาจาก catalog ที่สแกนไว้ ดูได้แม้ไดรฟ์ไม่ได้เสียบ "
+                    "(plugged_in=false คือตอนนี้ไม่ได้เสียบ แต่ข้อมูลยังใช้ได้)"}
+
+
+def _mcp_projects(conn, drive=None, sort="size", limit=40):
+    rows = conn.execute("SELECT drive_label, relpath, size, mtime FROM files").fetchall()
+    folders = sort_folders(build_smart_folders(rows), sort if sort in ("client", "size") else "size")
+    if drive:
+        folders = [f for f in folders if f["drive"] == drive]
+    total = len(folders)
+    out = []
+    for f in folders[:limit]:
+        out.append({"drive": f["drive"], "folder": f["folder"], "size": human_size(f["size"]),
+                    "size_bytes": f["size"], "files": f.get("count"),
+                    "client": f.get("client"), "job": f.get("job"),
+                    "date": f.get("date"), "date_normalized": f.get("dnorm")})
+    return {"projects": out, "shown": len(out), "total_matching": total}
+
+
+def _mcp_call(db_path, name, a):
+    conn = get_conn(db_path)
+    try:
+        if name == "list_drives":
+            return _mcp_drives(conn)
+
+        if name == "search_files":
+            limit = int(a.get("limit") or 50)
+            rows = search_files(conn, a["query"], limit=limit)
+            return {"matches": [{"drive": d, "path": rp, "size": human_size(sz),
+                                 "modified": time.strftime("%Y-%m-%d", time.localtime(mt))}
+                                for d, rp, sz, mt in rows],
+                    "count": len(rows)}
+
+        if name == "list_projects":
+            return _mcp_projects(conn, a.get("drive"), a.get("sort", "size"),
+                                 int(a.get("limit") or 40))
+
+        if name == "list_files_in_project":
+            rows = files_in_folder(conn, a["drive"], a["folder"], int(a.get("limit") or 100))
+            return {"files": [{"path": r["relpath"], "size": r["size_human"],
+                               "modified": r["mdate"]} for r in rows], "count": len(rows)}
+
+        if name == "find_reclaimable":
+            rule = a.get("rule")
+            if rule:
+                rows = reclaim_junk_files(conn, rule, limit=int(a.get("limit") or 50))
+                return {"rule": rule, "files": rows, "count": len(rows)}
+            s = reclaim_junk_summary(conn)
+            rules = [r for r in s if r["files"]]
+            return {"rules": [{"id": r["id"], "label": r["label"], "files": r["files"],
+                               "size": r["bytes_human"], "size_bytes": r["bytes"],
+                               "tier": r["tier"], "note": r.get("note")} for r in rules],
+                    "total_reclaimable": human_size(sum(r["bytes"] for r in rules)),
+                    "note": "tier=safe ลบได้ · tier=review ควรดูก่อน (เช่น Auto-Save คือไฟล์โปรเจกต์สำรอง) "
+                            "· HDDCAT ไม่ลบไฟล์ให้ ต้องลบเอง"}
+
+        if name == "find_archive_candidates":
+            mode = a.get("mode") or "folder"
+            default_gb = 50 if mode == "folder" else 1
+            min_bytes = int(float(a.get("min_gb") or default_gb) * 1024 ** 3)
+            years = float(a.get("years") or 2)
+            drive = a.get("drive") or None
+            limit = int(a.get("limit") or 30)
+            rows = reclaim_bigold(conn, min_bytes, years, drive=drive, mode=mode, limit=limit)
+            total = reclaim_bigold_total(conn, min_bytes, years, drive=drive, mode=mode)
+            return {"criteria": {"mode": mode, "min_gb": min_bytes / 1024 ** 3,
+                                 "untouched_years": years, "drive": drive},
+                    "candidates": rows, "shown": len(rows), "total": total,
+                    "note": "total คือยอดรวมทุกแถวที่เข้าเงื่อนไข ไม่ใช่แค่แถวที่แสดง"}
+
+        if name == "find_duplicate_projects":
+            rows = reclaim_consolidate(conn, limit=int(a.get("limit") or 15))
+            return {"groups": rows,
+                    "note": "verdict=copy คือไฟล์ซ้อนทับกันมากจนถือเป็นสำเนาซ้ำ "
+                            "(เก็บลูกเดียวพอ) · verdict=split คืองานเดียวกันถูกแบ่งไว้หลายลูก"}
+
+        if name == "get_move_plan":
+            target = float(a.get("target_free_pct") or 15) / 100.0
+            return reclaim_move_plan(conn, target_free=target)
+
+        if name == "space_by_type":
+            data = reclaim_by_type(conn)
+            drive = a.get("drive")
+            if drive and drive in (data.get("drives") or {}):
+                return {"drive": drive, "types": data["drives"][drive]}
+            return {"total": data.get("total"), "drives": list((data.get("drives") or {}).keys()),
+                    "note": "ใส่ drive เพื่อดูแยกรายไดรฟ์"}
+
+        if name == "reveal_in_finder":
+            if running_translated():
+                return {"ok": False, "error": ROSETTA_HINT}
+            loc = locate_on_drive(conn, a["drive"], a.get("relpath", ""))
+            if not loc["ok"]:
+                return loc
+            reveal_in_file_manager(loc["path"])
+            return {"ok": True, "opened": loc["path"], "exact_match": loc["exact"]}
+
+        return {"error": "ไม่รู้จักเครื่องมือ '%s'" % name}
+    finally:
+        conn.close()
+
+
+def _mcp_write(msg):
+    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def cmd_mcp(args):
+    """MCP server over stdio. Speaks newline-delimited JSON-RPC 2.0."""
+    db_path = args.db
+    sys.stderr.write("HDDCAT MCP server %s · db=%s\n" % (__version__, db_path))
+    sys.stderr.flush()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except ValueError:
+            continue
+        rid = req.get("id")
+        method = req.get("method") or ""
+        # notifications carry no id and must not be answered
+        if rid is None and method.startswith("notifications/"):
+            continue
+        try:
+            if method == "initialize":
+                asked = (req.get("params") or {}).get("protocolVersion")
+                result = {
+                    "protocolVersion": asked or MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "hddcat", "version": __version__},
+                }
+            elif method == "tools/list":
+                result = {"tools": MCP_TOOLS}
+            elif method == "tools/call":
+                p = req.get("params") or {}
+                data = _mcp_call(db_path, p.get("name"), p.get("arguments") or {})
+                result = {"content": [{"type": "text",
+                                       "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
+            elif method == "ping":
+                result = {}
+            else:
+                if rid is not None:
+                    _mcp_write({"jsonrpc": "2.0", "id": rid,
+                                "error": {"code": -32601, "message": "ไม่รองรับ method '%s'" % method}})
+                continue
+            if rid is not None:
+                _mcp_write({"jsonrpc": "2.0", "id": rid, "result": result})
+        except Exception as e:
+            if rid is not None:
+                _mcp_write({"jsonrpc": "2.0", "id": rid,
+                            "error": {"code": -32603, "message": "%s: %s" % (type(e).__name__, e)}})
 
 
 _DIST_README = """# HDDCAT 🐈💾 — Every File You Own. One Search Away.
@@ -4166,6 +4481,9 @@ def main():
 
     sp = sub.add_parser("build-dist", help="สร้าง dist/HDDCAT.zip สำหรับแจกจ่าย")
     sp.set_defaults(func=cmd_build_dist)
+
+    sp = sub.add_parser("mcp", help="MCP server (stdio) — ให้ AI ถามคลังไฟล์ได้โดยตรง")
+    sp.set_defaults(func=cmd_mcp)
 
     sp = sub.add_parser("serve", help="เปิด local web UI (127.0.0.1 เท่านั้น)")
     sp.add_argument("--port", type=int, default=8765)
