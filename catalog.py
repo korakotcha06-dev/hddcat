@@ -37,7 +37,7 @@ WORKFLOW
   5. `export-obsidian` writes one markdown note per drive into your vault so
      you can browse/search the catalog from Obsidian itself.
 """
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 import argparse
 import json
@@ -1727,6 +1727,92 @@ def _mcp_write(msg):
     sys.stdout.flush()
 
 
+# --------------------------------------------------------- MCP setup helper
+# The MCP server is useless to someone who cannot work out how to point their
+# AI client at it, and the audience for this app does not open Terminal. So the
+# app works the wiring out for itself and hands over a command to paste - or
+# writes the Claude Desktop config directly, on request.
+
+CLAUDE_DESKTOP_CONFIG = os.path.expanduser(
+    "~/Library/Application Support/Claude/claude_desktop_config.json")
+
+
+def mcp_setup_info(db_path):
+    """Everything needed to connect an AI client to this catalog."""
+    # prefer Apple's stub over the resolved Command Line Tools path: it survives
+    # CLT updates, and it is the interpreter the .app itself runs on (python.org
+    # builds ship without CA certs, which breaks the update check)
+    py = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else (sys.executable or "python3")
+    script = os.path.abspath(__file__)
+    db = os.path.abspath(os.path.expanduser(db_path))
+    cli = "claude mcp add hddcat -s user -- %s %s --db %s mcp" % (py, script, db)
+    desktop_entry = {"command": py, "args": [script, "--db", db, "mcp"]}
+    installed, configured = False, False
+    try:
+        installed = os.path.isdir(os.path.dirname(CLAUDE_DESKTOP_CONFIG))
+        if os.path.isfile(CLAUDE_DESKTOP_CONFIG):
+            with open(CLAUDE_DESKTOP_CONFIG, encoding="utf-8") as f:
+                configured = "hddcat" in (json.load(f).get("mcpServers") or {})
+    except Exception:
+        pass
+    return {"python": py, "script": script, "db": db, "cli_command": cli,
+            "desktop_entry": desktop_entry, "desktop_config": CLAUDE_DESKTOP_CONFIG,
+            "desktop_installed": installed, "desktop_configured": configured}
+
+
+def mcp_write_desktop_config(db_path, config_path=None):
+    """Add (or refresh) the hddcat entry in Claude Desktop's config.
+
+    Merges into whatever is already there and backs the file up first - this is
+    the user's own config and may well list other servers."""
+    path = config_path or CLAUDE_DESKTOP_CONFIG
+    info = mcp_setup_info(db_path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data, backup = {}, None
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            raw = f.read().strip()
+        if raw:
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                raise ValueError("ไฟล์ config ของ Claude Desktop อ่านไม่ออก (JSON เสีย) "
+                                 "แก้ไฟล์นี้ก่อน: %s" % path)
+        backup = path + ".hddcat-backup"
+        with open(backup, "w", encoding="utf-8") as f:
+            f.write(raw)
+    servers = data.setdefault("mcpServers", {})
+    servers["hddcat"] = info["desktop_entry"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, ensure_ascii=False, indent=2))
+    return {"path": path, "backup": backup, "others": [k for k in servers if k != "hddcat"]}
+
+
+def cmd_mcp_setup(args):
+    info = mcp_setup_info(args.db)
+    if args.desktop:
+        try:
+            res = mcp_write_desktop_config(args.db)
+        except ValueError as e:
+            print("ERROR: %s" % e)
+            sys.exit(1)
+        print("เขียน config ให้ Claude Desktop แล้ว: %s" % res["path"])
+        if res["backup"]:
+            print("สำรองของเดิมไว้ที่: %s" % res["backup"])
+        if res["others"]:
+            print("MCP server อื่นในไฟล์ยังอยู่ครบ: %s" % ", ".join(res["others"]))
+        print("ปิดแล้วเปิด Claude Desktop ใหม่ แล้วลองถามว่า \"ไดรฟ์ไหนใกล้เต็ม\"")
+        return
+    print("Claude Code — วางบรรทัดนี้ใน Terminal:\n")
+    print("  %s\n" % info["cli_command"])
+    if info["desktop_configured"]:
+        print("Claude Desktop — ตั้งค่าไว้แล้ว")
+    elif info["desktop_installed"]:
+        print("Claude Desktop — ตั้งให้อัตโนมัติได้ด้วย:\n")
+        print("  python3 %s --db %s mcp --setup --desktop\n" % (info["script"], info["db"]))
+    print("catalog ที่จะให้ AI อ่าน: %s" % info["db"])
+
+
 def cmd_mcp(args):
     """MCP server over stdio. Speaks newline-delimited JSON-RPC 2.0."""
     db_path = args.db
@@ -2578,6 +2664,14 @@ tr.detail td { background: var(--color-bg-1); padding: 12px 20px 16px; }
   font-weight: var(--p-semi-bold); color: var(--color-primary);
   background: rgba(102, 51, 238, 0.09); border-radius: 20px; padding: 3px 9px; }
 .home-panel h2 .pill.alert { color: var(--color-danger); background: rgba(255, 0, 3, 0.08); }
+.mcp-panel { margin-top: 18px; }
+.mcp-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.mcp-row code { flex: 1 1 320px; min-width: 0; overflow-x: auto; white-space: nowrap;
+  font-size: 12.5px; padding: 10px 12px; border-radius: 10px;
+  background: var(--color-bg); border: 1px solid var(--color-border); color: var(--color-title); }
+#mcp-msg:empty { display: none; }
+#mcp-msg { margin-top: 10px; }
+#mcp-msg.err { color: var(--color-danger); }
 
 .mini-row { display: flex; align-items: center; gap: 12px; padding: 11px 0;
   border-top: 1px solid rgba(5, 1, 28, 0.06); }
@@ -2882,6 +2976,22 @@ details.dgroup li { padding: 3px 0; overflow-wrap: anywhere; }
         <h2>สแกนล่าสุด</h2>
         <div id="home-recent"></div>
       </div>
+    </div>
+
+    <div class="home-panel mcp-panel" id="mcp-panel" hidden>
+      <h2>ถามคลังนี้จาก AI ผู้ช่วย <span class="pill" id="mcp-state"></span></h2>
+      <p class="home-note" style="margin:0 0 12px">ถ้าคุณใช้ <b>Claude</b> อยู่แล้ว ต่อได้ในขั้นตอนเดียว
+        แล้วถามเป็นภาษาคนได้เลยว่า “ไดรฟ์ไหนใกล้เต็ม” หรือ “งานลูกค้ารายนี้อยู่ไดรฟ์ไหน” —
+        ทุกอย่างรันในเครื่องคุณ ไม่มีอะไรถูกส่งออกไปไหน</p>
+      <div class="mcp-row">
+        <code id="mcp-cmd">…</code>
+        <button class="btn btn-border" id="mcp-copy">คัดลอกคำสั่ง</button>
+      </div>
+      <div class="mcp-row" id="mcp-desktop-row" hidden>
+        <span class="home-note">ใช้ Claude Desktop อยู่ ตั้งค่าให้อัตโนมัติได้เลย (สำรองไฟล์เดิมไว้ให้)</span>
+        <button class="btn" id="mcp-desktop">ตั้งค่าให้ Claude Desktop</button>
+      </div>
+      <div id="mcp-msg" class="home-note"></div>
     </div>
   </div>
 </section>
@@ -3367,6 +3477,32 @@ function renderHomeStats(drives) {
       renderLib();
     }));
 }
+
+/* --- ต่อ AI: บอกคำสั่งที่ถูกต้องให้เลย ไม่ต้องให้ใครไปเดา path ใน .app --- */
+async function loadMcpPanel() {
+  const box = $("mcp-panel");
+  const res = await api("/api/mcp-setup");
+  if (!res.ok) return;
+  box.hidden = false;
+  $("mcp-cmd").textContent = res.cli_command;
+  const pill = $("mcp-state");
+  if (res.desktop_configured) { pill.textContent = "ต่อ Claude Desktop แล้ว"; pill.hidden = false; }
+  else pill.hidden = true;
+  $("mcp-desktop-row").hidden = !(res.desktop_installed && !res.desktop_configured);
+}
+$("mcp-copy").addEventListener("click", e =>
+  copyLines([$("mcp-cmd").textContent], e.target));
+$("mcp-desktop").addEventListener("click", async e => {
+  const btn = e.target, msg = $("mcp-msg");
+  btn.disabled = true; msg.className = "home-note"; msg.textContent = "กำลังตั้งค่า…";
+  const r = await api("/api/mcp-setup", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: "{}"});
+  btn.disabled = false;
+  if (!r.ok) { msg.className = "home-note err"; msg.textContent = r.error; return; }
+  msg.textContent = "ตั้งค่าแล้ว — ปิดแล้วเปิด Claude Desktop ใหม่ จากนั้นลองถามว่า “ไดรฟ์ไหนใกล้เต็ม”"
+    + (r.others && r.others.length ? " · MCP อื่นที่มีอยู่ยังอยู่ครบ" : "");
+  loadMcpPanel();
+});
 
 /* --- home file search (same endpoint as the library's filename search) --- */
 let homeSearchT = null;
@@ -4010,6 +4146,7 @@ $("version-chip").addEventListener("click", async () => {
 (async () => {
   loadDrives();
   loadFolders();
+  loadMcpPanel();
   pollJobs();
   pollVolumes();
   checkUpdate();
@@ -4208,6 +4345,8 @@ def cmd_serve(args):
                     self._json({"ok": True, "current": __version__, "latest": latest,
                                 "url": st.get("url"), "notes": st.get("notes") or "",
                                 "available": available, "enabled": st.get("enabled", True)})
+                elif route == "/api/mcp-setup":
+                    self._json(dict(mcp_setup_info(db_path), ok=True))
                 elif route == "/api/volumes":
                     vols = []
                     mounted = {}
@@ -4346,6 +4485,14 @@ def cmd_serve(args):
                         return
                     reveal_in_file_manager(loc["path"])
                     self._json({"ok": True, "path": loc["path"], "exact": loc["exact"]})
+                elif self.path == "/api/mcp-setup":
+                    try:
+                        res = mcp_write_desktop_config(db_path)
+                    except (ValueError, OSError) as e:
+                        self._json({"ok": False, "error": str(e)}, 400)
+                        return
+                    self._json({"ok": True, "path": res["path"],
+                                "backup": res["backup"], "others": res["others"]})
                 elif self.path == "/api/drive-path":
                     label = (body.get("label") or "").strip()
                     path = (body.get("path") or "").strip()
@@ -4483,7 +4630,11 @@ def main():
     sp.set_defaults(func=cmd_build_dist)
 
     sp = sub.add_parser("mcp", help="MCP server (stdio) — ให้ AI ถามคลังไฟล์ได้โดยตรง")
-    sp.set_defaults(func=cmd_mcp)
+    sp.add_argument("--setup", action="store_true",
+                    help="แสดงวิธีต่อกับ Claude แทนการรัน server")
+    sp.add_argument("--desktop", action="store_true",
+                    help="ใช้กับ --setup: เขียน config ให้ Claude Desktop เลย (สำรองของเดิมไว้)")
+    sp.set_defaults(func=lambda a: cmd_mcp_setup(a) if a.setup else cmd_mcp(a))
 
     sp = sub.add_parser("serve", help="เปิด local web UI (127.0.0.1 เท่านั้น)")
     sp.add_argument("--port", type=int, default=8765)

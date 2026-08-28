@@ -47,6 +47,11 @@
       "@type": "HowToStep",
       "name": "หาไฟล์ซ้ำ คืนพื้นที่",
       "text": "แท็บ “เคลียร์พื้นที่” ตอบสามคำถามในหน้าเดียว: cache กับ preview ที่โปรแกรมสร้างใหม่ได้กินไปเท่าไร · งานก้อนไหนใหญ่และไม่ได้แตะมานาน · งานไหนซ้ำกันอยู่หลายไดรฟ์ แล้วยังมีแผนย้ายของบอกว่าไดรฟ์ที่ใกล้เต็ม ควรย้ายอะไรไปลูกไหน · ทุกอย่างอ่านอย่างเดียว ไม่ลบไม่ย้ายไฟล์ให้ คุณตัดสินใจเองทุกก้อน"
+    },
+    {
+      "@type": "HowToStep",
+      "name": "ต่อกับ AI ผู้ช่วย (ทำหรือไม่ทำก็ได้)",
+      "text": "ถ้าคุณใช้ Claude อยู่แล้ว ต่อ HDDCAT เข้ากับมันได้ แล้วถามเป็นภาษาคนว่า “งานลูกค้ารายนี้อยู่ไดรฟ์ไหน” หรือ “ไดรฟ์ไหนใกล้เต็ม ควรย้ายอะไรไปไหน” · เปิดแอปแล้วดูการ์ด “ถามคลังนี้จาก AI ผู้ช่วย” ที่หน้าแรก กดคัดลอกคำสั่งไปวางใน Terminal ครั้งเดียว หรือถ้าใช้ Claude Desktop กดปุ่มให้แอปตั้งค่าให้เลย · AI อ่านได้อย่างเดียว สแกนหรือลบอะไรไม่ได้ และทุกอย่างยังรันในเครื่องคุณ ไม่มีอะไรถูกส่งขึ้น cloud · ถ้าไม่ได้ใช้ Claude ก็ข้ามข้อนี้ไปได้ ฟีเจอร์อื่นทั้งหมดใช้ได้ตามปกติอยู่แล้ว"
     }
   ]
 }
@@ -221,6 +226,7 @@ body { overflow-x: hidden; }
   .dl-free.compact { padding: 8px 13px; font-size: 13px; gap: 6px; }
 }
 @media (max-width: 360px) { .topbar-right .ghbtn { display: none; } }
+.step-card p.mini { font-size: 13.5px; color: var(--counter-title); }
 </style>
 </head>
 <body>
@@ -237,7 +243,7 @@ body { overflow-x: hidden; }
       <a class="navlink" href="./">หน้าแรก</a>
       <a class="ghbtn" href="https://github.com/korakotcha06-dev/hddcat" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="#05011C"><path fill-rule="evenodd" d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.084 1.84 1.236 1.84 1.236 1.07 1.835 2.807 1.305 3.492.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/></svg><span class="gh-label">GitHub</span></a>
       <a class="bmc-y" href="https://www.buymeacoffee.com/korakot" target="_blank" rel="noopener">☕ Buy me a coffee</a>
-      <a class="btn dl-free compact" href="HDDCAT-1.6.0.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
+      <a class="btn dl-free compact" href="HDDCAT-1.6.1.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
     </div>
   </div>
 </header>
@@ -289,6 +295,15 @@ body { overflow-x: hidden; }
     <p>แท็บ “เคลียร์พื้นที่” ตอบสามคำถามในหน้าเดียว: cache กับ preview ที่โปรแกรมสร้างใหม่ได้กินไปเท่าไร · งานก้อนไหนใหญ่และไม่ได้แตะมานาน · งานไหนซ้ำกันอยู่หลายไดรฟ์ แล้วยังมีแผนย้ายของบอกว่าไดรฟ์ที่ใกล้เต็ม ควรย้ายอะไรไปลูกไหน · ทุกอย่างอ่านอย่างเดียว ไม่ลบไม่ย้ายไฟล์ให้ คุณตัดสินใจเองทุกก้อน</p>
     <img src="assets/howto-dedup-v2.jpg" alt="ผลการหาไฟล์ซ้ำ" loading="lazy">
   </div>
+
+  <div class="step-card" id="ai">
+    <div class="step-num">6</div>
+    <h3>ต่อกับ AI ผู้ช่วย — ทำหรือไม่ทำก็ได้</h3>
+    <p>ข้อนี้สำหรับคนที่<b>ใช้ Claude อยู่แล้ว</b>เท่านั้น ถ้าไม่ได้ใช้ ข้ามไปได้เลย ฟีเจอร์อื่นทั้งหมดใช้ได้ตามปกติโดยไม่ต้องต่ออะไร</p>
+    <p>เปิดแอปแล้วดูการ์ด <b>“ถามคลังนี้จาก AI ผู้ช่วย”</b> ที่หน้าแรก — แอปเติม path ให้ครบแล้ว กด <b>คัดลอกคำสั่ง</b> ไปวางใน Terminal ครั้งเดียวจบ ถ้าใช้ <b>Claude Desktop</b> กดปุ่มให้แอปเขียน config ให้เลย (สำรองไฟล์เดิมไว้ให้ และ MCP อื่นที่มีอยู่ไม่หาย)</p>
+    <p>จากนั้นถามเป็นภาษาคนได้เลย เช่น “ไดรฟ์ไหนใกล้เต็ม แล้วในนั้นมีงานเก่าอะไรที่ควรย้าย” หรือ “ไฟล์ชื่อนี้อยู่ไดรฟ์ลูกไหน”</p>
+    <p class="mini">AI ที่ต่อเข้ามา <b>อ่านได้อย่างเดียว</b> — สแกนไดรฟ์หรือลบข้อมูลใน catalog ไม่ได้ · การเชื่อมต่อเป็นแบบ stdio คือ Claude เปิดโปรแกรมนี้ในเครื่องคุณเองแล้วคุยกันตรง ๆ <b>ไม่ผ่านเซิร์ฟเวอร์ ไม่มีอะไรถูกส่งขึ้น cloud</b></p>
+  </div>
 </div>
 
 <div class="tips-section">
@@ -302,7 +317,7 @@ body { overflow-x: hidden; }
 </div>
 
 <div class="cta-block">
-  <a class="btn dl-free" href="HDDCAT-1.6.0.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
+  <a class="btn dl-free" href="HDDCAT-1.6.1.zip" download><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg>Download Free</a>
   <p class="cta-text">พร้อมแล้ว? โหลดฟรี ไม่มีเงื่อนไข</p>
   <div class="hero-social">
     <a class="ghbtn" href="https://github.com/korakotcha06-dev/hddcat" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="#05011C"><path fill-rule="evenodd" d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.082-.73.082-.73 1.205.084 1.84 1.236 1.84 1.236 1.07 1.835 2.807 1.305 3.492.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/></svg><span class="gh-label">GitHub</span></a>
