@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HDDCAT — สแกนทุกฮาร์ดดิสก์ ค้นทุกไฟล์ ในที่เดียว (ฟรี, macOS)</title>
-<meta name="description" content="HDDCAT คือเครื่องมือฟรีบน macOS สแกนฮาร์ดดิสก์ทุกลูกเข้า catalog เดียว ค้นไฟล์เจอในไม่ถึงวินาที โดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้า/วันที่อัตโนมัติ">
+<meta name="description" content="HDDCAT คือเครื่องมือฟรีบน macOS สแกนฮาร์ดดิสก์ทุกลูกเข้า catalog เดียว ค้นไฟล์เจอในไม่ถึงวินาทีโดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้า/วันที่อัตโนมัติ บอกว่า cache กับงานเก่ากินพื้นที่ไปเท่าไร ควรย้ายอะไรไปไดรฟ์ไหน และกดเปิดโฟลเดอร์จริงใน Finder ได้">
 <link rel="canonical" href="__CANONICAL__/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="HDDCAT — สแกนทุกฮาร์ดดิสก์ ค้นทุกไฟล์ ในที่เดียว (ฟรี, macOS)">
-<meta property="og:description" content="HDDCAT คือเครื่องมือฟรีบน macOS สแกนฮาร์ดดิสก์ทุกลูกเข้า catalog เดียว ค้นไฟล์เจอในไม่ถึงวินาที โดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้า/วันที่อัตโนมัติ">
+<meta property="og:description" content="HDDCAT คือเครื่องมือฟรีบน macOS สแกนฮาร์ดดิสก์ทุกลูกเข้า catalog เดียว ค้นไฟล์เจอในไม่ถึงวินาทีโดยไม่ต้องเสียบไดรฟ์ จัดกลุ่มงานตามลูกค้า/วันที่อัตโนมัติ บอกว่า cache กับงานเก่ากินพื้นที่ไปเท่าไร ควรย้ายอะไรไปไดรฟ์ไหน และกดเปิดโฟลเดอร์จริงใน Finder ได้">
 <meta property="og:image" content="assets/hero.jpg">
 <meta property="og:url" content="__CANONICAL__/">
 <meta name="twitter:card" content="summary_large_image">
@@ -315,7 +315,7 @@ body { overflow-x: hidden; }
 
 <div class="hero-features" id="features">
   <h2 class="hero-features-h2">The Power of HDD Catalog</h2>
-  <p class="hero-features-sub">เครื่องมือเดียว จัดการทุกไดรฟ์ที่คุณมี</p>
+  <p class="hero-features-sub">เครื่องมือเดียว จัดการทุกไดรฟ์ที่คุณมี — ค้นเจอ รู้ว่าอะไรกินที่ แล้วไปถึงโฟลเดอร์จริง</p>
   <div class="hero-feature-cards">
     <div class="card">
       <div class="hero-feature-emoji">⚡</div>
@@ -335,7 +335,17 @@ body { overflow-x: hidden; }
     <div class="card">
       <div class="hero-feature-emoji">♻️</div>
       <h3>Reclaim Your Terabytes</h3>
-      <p class="hero-feature-desc">จับไฟล์ซ้ำข้ามไดรฟ์ คืนพื้นที่หลายร้อย GB ในคลิกเดียว</p>
+      <p class="hero-feature-desc">cache กับ preview ที่โปรแกรมสร้างใหม่ได้ · ไฟล์ซ้ำข้ามไดรฟ์ · งานเก่าที่ไม่ได้แตะมานาน — บอกให้ครบว่าคืนได้เท่าไร แล้วให้คุณเป็นคนตัดสินใจลบเอง</p>
+    </div>
+    <div class="card">
+      <div class="hero-feature-emoji">🚚</div>
+      <h3>Know What to Move</h3>
+      <p class="hero-feature-desc">ไดรฟ์ไหนใกล้เต็ม ควรย้ายงานก้อนไหนไปลูกไหน — คำนวณให้เสร็จ รู้ด้วยว่าหลายชื่ออาจเป็นดิสก์ลูกเดียวกัน จะได้ไม่นับที่ว่างซ้ำ</p>
+    </div>
+    <div class="card">
+      <div class="hero-feature-emoji">📂</div>
+      <h3>Straight to the Folder</h3>
+      <p class="hero-feature-desc">เจองานแล้วกดเปิดใน Finder ได้เลยเมื่อไดรฟ์เสียบอยู่ — ไม่ต้องไล่คลิกหาเอง ยังไม่เสียบก็บอกว่าต้องหยิบลูกไหน</p>
     </div>
   </div>
 </div>
@@ -358,7 +368,7 @@ body { overflow-x: hidden; }
   </div>
   <div class="faq-item">
     <h3>ข้อมูลของฉันไปอยู่ที่ไหน?</h3>
-    <p>อยู่ในเครื่องคุณ 100% — catalog ทั้งหมดเก็บในไฟล์ catalog.db ข้างตัวโปรแกรม ไม่มีเซิร์ฟเวอร์ ไม่มี cloud และไม่มีการส่งข้อมูลใดออกจากเครื่อง (แอปมีการเช็คเวอร์ชันใหม่จากเว็บนี้วันละครั้ง — ส่งแค่เลขเวอร์ชัน และปิดได้)</p>
+    <p>อยู่ในเครื่องคุณ 100% — catalog ทั้งหมดเก็บในไฟล์ <code>~/HDDCAT/catalog.db</code> ในเครื่องคุณ ไม่มีเซิร์ฟเวอร์ ไม่มี cloud และไม่มีการส่งข้อมูลใดออกจากเครื่อง (แอปมีการเช็คเวอร์ชันใหม่จากเว็บนี้วันละครั้ง — ส่งแค่เลขเวอร์ชัน และปิดได้)</p>
   </div>
   <div class="faq-item">
     <h3>ต้องมีอะไรบ้าง?</h3>
