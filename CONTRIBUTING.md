@@ -46,4 +46,6 @@ HDDCAT_PORT=8788 HDDCAT_DEBUG=1 ./shell/build/HDDCAT
 
 ## Releases (maintainer)
 
-Bump `__version__` → `python3 catalog.py build-dist` → update `site/version.json` + deploy → `gh release create vX.Y.Z dist/HDDCAT.zip`
+Bump `__version__` → `python3 catalog.py build-dist` → point the download buttons at `HDDCAT-<ver>.zip` and deploy the site → upload the zip under both that name and `HDDCAT.zip` → `gh release create vX.Y.Z dist/HDDCAT.zip --target <full SHA>` → bump `site/version-current.json`.
+
+**Never bump `site/version.json`.** It is frozen at 1.1.2 on purpose: the in-app updater in releases up to 1.1.2 unzips without restoring the executable bit, so an update it performs leaves the app unopenable, and that cannot be fixed from the server. nginx picks the feed by `User-Agent: HDDCAT/<version>` — 1.1.2 and older (and anything unidentified) get the frozen `version.json`, 1.2.0 and newer get `version-current.json`. The map lives in `conf.d/hddcat-update-feed.conf` on the web host.
