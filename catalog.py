@@ -4685,7 +4685,7 @@ def main():
     sp.add_argument("--consolidate", action="store_true",
                      help="งานชื่อเดียวกันที่กระจายอยู่หลายไดรฟ์")
     sp.add_argument("--target-free", type=float, default=15.0,
-                     help="(--move-plan) อยากให้ทุกไดรฟ์เหลือที่ว่างกี่ % (default 15)")
+                     help="(--move-plan) อยากให้ทุกไดรฟ์เหลือที่ว่างกี่ %% (default 15)")
     sp.set_defaults(func=cmd_reclaim)
 
     sp = sub.add_parser("forget", help="ลบ drive ออกจาก catalog (ลบแค่ข้อมูลใน DB ไม่แตะไฟล์จริง)")
