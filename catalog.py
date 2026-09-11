@@ -999,6 +999,29 @@ def _cached(conn, name, build):
     return value
 
 
+def smart_folders_cached(conn):
+    """The smart library, memoised.
+
+    build_smart_folders reads every row in `files` and regroups them in Python.
+    On a 40-drive catalog that is seconds of work and a few hundred MB of rows,
+    and it ran on every page load, after every scan, after every drive removal
+    and on every MCP call. The answer only changes when the catalog changes,
+    which is exactly what _reclaim_cache_key already tracks.
+
+    Returns the unsorted rows; callers sort a copy, because sort_folders sorts
+    in place and would otherwise reorder the cached list under everyone else.
+    """
+    def build():
+        rows = conn.execute(
+            "SELECT drive_label, relpath, size, mtime FROM files").fetchall()
+        out = build_smart_folders(rows)
+        for d in out:
+            d["size_human"] = human_size(d["size"])
+        return out
+
+    return _cached(conn, "smart_folders", build)
+
+
 def _safe_date(mtime):
     """Formatted date, or None when the timestamp is impossible (see MTIME_FLOOR)."""
     if mtime is None or mtime < MTIME_FLOOR or mtime > time.time() + 86400:
@@ -1680,8 +1703,8 @@ def _mcp_drives(conn):
 
 
 def _mcp_projects(conn, drive=None, sort="size", limit=40):
-    rows = conn.execute("SELECT drive_label, relpath, size, mtime FROM files").fetchall()
-    folders = sort_folders(build_smart_folders(rows), sort if sort in ("client", "size") else "size")
+    folders = sort_folders(list(smart_folders_cached(conn)),
+                           sort if sort in ("client", "size") else "size")
     if drive:
         folders = [f for f in folders if f["drive"] == drive]
     total = len(folders)
@@ -4269,13 +4292,9 @@ def cmd_serve(args):
                     self._send(200, css, "text/css; charset=utf-8", no_store=True)
                 elif route == "/api/folders":
                     conn = get_conn(db_path)
-                    rows = conn.execute(
-                        "SELECT drive_label, relpath, size, mtime FROM files").fetchall()
-                    conn.close()
-                    out = sort_folders(build_smart_folders(rows),
+                    out = sort_folders(list(smart_folders_cached(conn)),
                                        q.get("sort", ["client"])[0])
-                    for d in out:
-                        d["size_human"] = human_size(d["size"])
+                    conn.close()
                     self._json({"ok": True, "rows": out})
                 elif route == "/api/drives":
                     conn = get_conn(db_path)
