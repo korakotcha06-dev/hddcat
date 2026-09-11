@@ -102,7 +102,9 @@ def get_conn(db_path):
 def scan_drive(db_path, drive_path, label, progress=None):
     """Core scan logic (shared by CLI and web UI). Opens its own connection so it
     can run in a background thread. Calls progress(count) every 5000 files.
-    Returns a stats dict; raises ValueError if drive_path is not a directory."""
+    Returns a stats dict; raises ValueError if drive_path is not a directory, or
+    if the drive disappears mid-scan - in which case the catalog is rolled back,
+    because a half-finished scan that looks finished is worse than no scan."""
     drive_path = os.path.abspath(drive_path)
     if not os.path.isdir(drive_path):
         raise ValueError(f"ไม่พบ path {drive_path}")
@@ -111,7 +113,20 @@ def scan_drive(db_path, drive_path, label, progress=None):
     conn.execute("DELETE FROM files WHERE drive_label=?", (label,))
     count = 0
     total_bytes = 0
-    for root, dirs, files in os.walk(drive_path):
+    unreadable = 0
+    unreadable_sample = []
+
+    def _unreadable(what):
+        # something we could not read: a folder os.walk could not open, or a
+        # file os.stat refused. Both used to be swallowed, so a scan stopped
+        # short by permissions reported a clean, complete-looking catalog.
+        nonlocal unreadable
+        unreadable += 1
+        if len(unreadable_sample) < 20:
+            unreadable_sample.append(what)
+
+    for root, dirs, files in os.walk(
+            drive_path, onerror=lambda e: _unreadable(getattr(e, "filename", None) or str(e))):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         for fname in files:
             if fname in SKIP_FILES:
@@ -120,6 +135,7 @@ def scan_drive(db_path, drive_path, label, progress=None):
             try:
                 st = os.stat(full)
             except OSError:
+                _unreadable(full)
                 continue
             relpath = os.path.relpath(full, drive_path)
             parts = relpath.split(os.sep)
@@ -133,11 +149,23 @@ def scan_drive(db_path, drive_path, label, progress=None):
             total_bytes += st.st_size
             if count % 5000 == 0 and progress:
                 progress(count)
+    if not os.path.isdir(drive_path):
+        # unplugged mid-scan: os.walk just stops early and we would happily
+        # write "scanned today, N files". Nothing is committed yet, so rolling
+        # back leaves the previous catalog for this drive exactly as it was.
+        conn.rollback()
+        conn.close()
+        raise ValueError(f"ไดรฟ์หายไประหว่างสแกน ({drive_path}) — catalog เดิมยังอยู่ครบ")
     try:
         usage = shutil.disk_usage(drive_path)
         disk_total, disk_free = usage.total, usage.free
     except OSError:
-        disk_total, disk_free = None, None
+        # keep the capacity we already knew rather than blanking it: NULL here
+        # drops the drive out of the move planner and the home page totals
+        row = conn.execute(
+            "SELECT total_bytes, free_bytes FROM drives WHERE drive_label=?",
+            (label,)).fetchone()
+        disk_total, disk_free = (row[0], row[1]) if row else (None, None)
     conn.execute("INSERT OR REPLACE INTO drives VALUES (?,?,?,?)",
                  (label, disk_total, disk_free, time.time()))
     # remember where the drive was mounted so "go to folder" can jump straight
@@ -146,7 +174,8 @@ def scan_drive(db_path, drive_path, label, progress=None):
     conn.commit()
     conn.close()
     return {"files": count, "bytes": total_bytes, "seconds": time.time() - t0,
-            "disk_total": disk_total, "disk_free": disk_free}
+            "disk_total": disk_total, "disk_free": disk_free,
+            "unreadable": unreadable, "unreadable_sample": unreadable_sample}
 
 
 def cmd_scan(args):
@@ -162,6 +191,12 @@ def cmd_scan(args):
     if res["disk_total"]:
         print(f"Drive capacity: {human_size(res['disk_total'])} total, {human_size(res['disk_free'])} free "
               f"({res['disk_free']/res['disk_total']*100:.0f}% free)")
+    if res["unreadable"]:
+        print(f"WARNING: อ่านไม่ได้ {res['unreadable']} รายการ - catalog ของไดรฟ์นี้ไม่ครบ")
+        for w in res["unreadable_sample"]:
+            print(f"  - {w}")
+        if res["unreadable"] > len(res["unreadable_sample"]):
+            print(f"  ... และอีก {res['unreadable'] - len(res['unreadable_sample'])} รายการ")
 
 
 def search_files(conn, keyword, limit=None):
@@ -3967,7 +4002,8 @@ async function pollJobs() {
     sbox.innerHTML = `เสร็จแล้ว: <b>${esc(s.label)}</b> —
       <div class="big">${s.files.toLocaleString()} ไฟล์ · ${esc(s.bytes_human)}</div>
       ใช้เวลา ${Math.round(s.seconds)} วินาที
-      ${s.disk_total ? `· พื้นที่ว่าง ${esc(s.disk_free_human)} / ${esc(s.disk_total_human)} (${s.pct_free}%)` : ""}`;
+      ${s.disk_total ? `· พื้นที่ว่าง ${esc(s.disk_free_human)} / ${esc(s.disk_total_human)} (${s.pct_free}%)` : ""}
+      ${s.unreadable ? `<div class="card-del-err">อ่านไม่ได้ ${s.unreadable.toLocaleString()} รายการ — catalog ของไดรฟ์นี้ไม่ครบ</div>` : ""}`;
     $("scan-btn").disabled = false;
     loadDrives(); loadFolders();
   } else if (s.status === "error" && $("scan-btn").disabled) {
