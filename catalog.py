@@ -53,6 +53,7 @@ import difflib
 import webbrowser
 import zipfile
 import tempfile
+import unicodedata
 import urllib.request
 from collections import defaultdict
 
@@ -137,7 +138,14 @@ def scan_drive(db_path, drive_path, label, progress=None):
             except OSError:
                 _unreadable(full)
                 continue
-            relpath = os.path.relpath(full, drive_path)
+            # HFS+ hands back decomposed names (e = e + combining acute) while
+            # APFS keeps whatever was typed, usually composed. Store one form or
+            # "Cafe_Wedding" copied between two drives is two different strings:
+            # invisible to the duplicate finder, and unfindable from a search box
+            # that composes. Thai is unaffected (no canonical decomposition);
+            # accented Latin, Japanese and Korean are the ones that bite.
+            relpath = unicodedata.normalize("NFC", os.path.relpath(full, drive_path))
+            fname = unicodedata.normalize("NFC", fname)
             parts = relpath.split(os.sep)
             depth1 = parts[0] if len(parts) > 1 else ""
             ext = os.path.splitext(fname)[1].lower()
@@ -200,13 +208,25 @@ def cmd_scan(args):
 
 
 def search_files(conn, keyword, limit=None):
-    """Shared search logic (CLI + web). Returns rows of (drive_label, relpath, size, mtime)."""
-    kw = f"%{keyword}%"
-    sql = ("SELECT drive_label, relpath, size, mtime FROM files "
-           "WHERE filename LIKE ? OR relpath LIKE ? ORDER BY drive_label, relpath")
+    """Shared search logic (CLI + web). Returns rows of (drive_label, relpath, size, mtime).
+
+    Matches both Unicode forms of the keyword: new scans store NFC, but a
+    catalog built before that still holds the NFD names an HFS+ drive reports,
+    and nobody should have to rescan 40 drives to find their own files."""
+    forms = [keyword]
+    for f in ("NFC", "NFD"):
+        n = unicodedata.normalize(f, keyword)
+        if n not in forms:
+            forms.append(n)
+    where = " OR ".join(["filename LIKE ? OR relpath LIKE ?"] * len(forms))
+    sql = (f"SELECT drive_label, relpath, size, mtime FROM files WHERE {where} "
+           "ORDER BY drive_label, relpath")
     if limit:
         sql += f" LIMIT {int(limit)}"
-    return conn.execute(sql, (kw, kw)).fetchall()
+    params = []
+    for f in forms:
+        params += [f"%{f}%", f"%{f}%"]
+    return conn.execute(sql, params).fetchall()
 
 
 def cmd_search(args):
