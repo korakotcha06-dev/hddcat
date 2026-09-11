@@ -4356,20 +4356,30 @@ def cmd_serve(args):
                             "SELECT drive_label, last_scanned FROM drives")}
                         # which cataloged drives can we reach right now? drives the
                         # UI can "go to folder" on (cheap: unplugged ones fail isdir)
-                        for lbl in known:
+                        for lbl in sorted(known):
                             m = resolve_drive_mount(conn, lbl)
                             if m:
                                 mounted[lbl] = m
                         conn.close()
+                        # a drive is "known" because we can reach it at this mount
+                        # point -- not because its volume name happens to equal the
+                        # label the user typed. Matching on the name alone made any
+                        # drive labelled after its sticker look brand new on every
+                        # plug-in, and the toast then offered to scan it a second
+                        # time under a second label.
+                        by_path = {}
+                        for lbl, m in mounted.items():
+                            by_path.setdefault(os.path.normpath(m), lbl)
                         for v in sorted(os.listdir("/Volumes")):
                             if v.startswith("."):
                                 continue
                             full = os.path.join("/Volumes", v)
                             if os.path.islink(full):
                                 continue  # e.g. "Macintosh HD" firmlink to /
+                            lbl = v if v in known else by_path.get(os.path.normpath(full))
                             vols.append({"path": full, "name": v,
-                                         "known_label": v if v in known else None,
-                                         "last_scanned": known.get(v)})
+                                         "known_label": lbl,
+                                         "last_scanned": known.get(lbl)})
                     except OSError:
                         pass
                     self._json({"ok": True, "volumes": vols, "mounted": mounted})
