@@ -1,0 +1,42 @@
+name: CI
+
+# HDDCAT has no build step and no dependencies, so there is nothing to install.
+# This exists to catch the two things a single-file stdlib program can still get
+# wrong: code that does not parse, and code that parses only on the Python the
+# author happens to run. A bare % in an argparse help string shipped in 1.6.1
+# and broke every command on Python 3.14 - that is the class of bug this catches.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest       # the only OS HDDCAT targets
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is what an older macOS still ships; 3.14 is what Homebrew and
+        # python.org hand a new user today. Both have to work.
+        python-version: ["3.9", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python3 -m py_compile catalog.py
+      - name: Every command builds its parser
+        # argparse only validates help strings when the subparser is built,
+        # so --help on each subcommand is the cheapest real smoke test there is
+        run: |
+          python3 catalog.py --help > /dev/null
+          for cmd in scan search report groups dedup reclaim forget open \
+                     build-dist mcp serve export-folders-csv export-csv \
+                     export-obsidian; do
+            echo "--- $cmd"
+            python3 catalog.py "$cmd" --help > /dev/null
+          done
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
