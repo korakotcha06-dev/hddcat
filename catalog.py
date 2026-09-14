@@ -207,25 +207,44 @@ def cmd_scan(args):
             print(f"  ... และอีก {res['unreadable'] - len(res['unreadable_sample'])} รายการ")
 
 
-def search_files(conn, keyword, limit=None):
-    """Shared search logic (CLI + web). Returns rows of (drive_label, relpath, size, mtime).
+def _search_where(keyword):
+    """WHERE fragment + params matching a keyword as literal text.
 
-    Matches both Unicode forms of the keyword: new scans store NFC, but a
-    catalog built before that still holds the NFD names an HFS+ drive reports,
-    and nobody should have to rescan 40 drives to find their own files."""
+    Matches both Unicode forms: new scans store NFC, but a catalog built before
+    that still holds the NFD names an HFS+ drive reports, and nobody should have
+    to rescan 40 drives to find their own files.
+
+    % and _ are LIKE wildcards. Left raw, a search for "shot_001" also matched
+    shot0001 and shotX001, and a lone "%" matched the entire catalog - the one
+    thing a file search must never do quietly. They are escaped here instead."""
     forms = [keyword]
     for f in ("NFC", "NFD"):
         n = unicodedata.normalize(f, keyword)
         if n not in forms:
             forms.append(n)
-    where = " OR ".join(["filename LIKE ? OR relpath LIKE ?"] * len(forms))
-    sql = (f"SELECT drive_label, relpath, size, mtime FROM files WHERE {where} "
-           "ORDER BY drive_label, relpath")
-    if limit:
-        sql += f" LIMIT {int(limit)}"
+    where = " OR ".join(
+        ["filename LIKE ? ESCAPE '\\' OR relpath LIKE ? ESCAPE '\\'"] * len(forms))
     params = []
     for f in forms:
-        params += [f"%{f}%", f"%{f}%"]
+        lit = f.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params += ["%%%s%%" % lit, "%%%s%%" % lit]
+    return where, params
+
+
+def count_search_files(conn, keyword):
+    """How many files match, ignoring any display limit."""
+    where, params = _search_where(keyword)
+    return conn.execute(
+        "SELECT COUNT(*) FROM files WHERE " + where, params).fetchone()[0]
+
+
+def search_files(conn, keyword, limit=None):
+    """Shared search logic (CLI + web). Returns rows of (drive_label, relpath, size, mtime)."""
+    where, params = _search_where(keyword)
+    sql = ("SELECT drive_label, relpath, size, mtime FROM files WHERE " + where +
+           " ORDER BY drive_label, relpath")
+    if limit:
+        sql += f" LIMIT {int(limit)}"
     return conn.execute(sql, params).fetchall()
 
 
@@ -262,6 +281,11 @@ def drives_overview(conn):
 # open a folder we have to find where that drive lives *right now*.
 
 _TOPS_CACHE = {}
+# the server answers requests on threads, and every one of them can reach this
+# cache. Without the lock, `key in cache` followed by `cache[key]` races the
+# clear() below and raises KeyError - a 500 on /api/drives, rare enough to look
+# like a fluke. Same pattern as _RECLAIM_CACHE_LOCK.
+_TOPS_CACHE_LOCK = threading.Lock()
 
 
 def drive_top_entries(conn, label):
@@ -271,8 +295,10 @@ def drive_top_entries(conn, label):
     stamp = conn.execute("SELECT last_scanned FROM drives WHERE drive_label=?",
                          (label,)).fetchone()
     key = (label, stamp[0] if stamp else None)
-    if key in _TOPS_CACHE:
-        return _TOPS_CACHE[key]
+    with _TOPS_CACHE_LOCK:
+        hit = _TOPS_CACHE.get(key)
+    if hit is not None:
+        return hit
     tops = [r[0] for r in conn.execute(
         "SELECT depth1 FROM files WHERE drive_label=? AND depth1 != '' "
         "GROUP BY depth1 ORDER BY COUNT(*) DESC LIMIT 10", (label,))]
@@ -282,9 +308,10 @@ def drive_top_entries(conn, label):
             "SELECT filename FROM files WHERE drive_label=? LIMIT 10", (label,))]
     # the volume poll asks about every drive - keep them all, but don't let a
     # long-running server grow this without bound (stale scan stamps pile up)
-    if len(_TOPS_CACHE) > 64:
-        _TOPS_CACHE.clear()
-    _TOPS_CACHE[key] = tops
+    with _TOPS_CACHE_LOCK:
+        if len(_TOPS_CACHE) > 64:
+            _TOPS_CACHE.clear()
+        _TOPS_CACHE[key] = tops
     return tops
 
 
@@ -3422,7 +3449,9 @@ $("q").addEventListener("input", () => {
     const res = await api(`/api/search?q=${encodeURIComponent(kw)}`);
     if (!res.ok || !res.rows.length) { $("file-hits").innerHTML = ""; return; }
     $("file-hits").innerHTML = `
-      <div class="dedup-head">ไฟล์ที่ชื่อตรงกับ "${esc(kw)}" — ${res.rows.length.toLocaleString()}${res.truncated ? "+" : ""} ไฟล์</div>
+      <div class="dedup-head">ไฟล์ที่ชื่อตรงกับ "${esc(kw)}" — ${res.truncated
+        ? `แสดง ${res.rows.length.toLocaleString()} จาก ${(res.total || 0).toLocaleString()} ไฟล์ (เรียงตามไดรฟ์ - ค้นให้แคบลงเพื่อเห็นไดรฟ์ท้าย ๆ)`
+        : `${res.rows.length.toLocaleString()} ไฟล์`}</div>
       <div class="tbl-wrap"><table><tbody>
       ${res.rows.map(f => `<tr>
         <td><span class="badge drive">${esc(f.drive)}</span></td>
@@ -4314,9 +4343,14 @@ def cmd_serve(args):
                         return
                     conn = get_conn(db_path)
                     rows = search_files(conn, kw, limit=501)
-                    conn.close()
                     truncated = len(rows) > 500
-                    self._json({"ok": True, "truncated": truncated, "rows": [
+                    # results are ordered by drive then path, so a cut at 500 is
+                    # a cut through the alphabet: everything on the last drives
+                    # simply never appears. We cannot rank by relevance here, but
+                    # we can stop pretending 500 was the whole answer.
+                    total = count_search_files(conn, kw) if truncated else len(rows)
+                    conn.close()
+                    self._json({"ok": True, "truncated": truncated, "total": total, "rows": [
                         {"drive": r[0], "relpath": r[1], "size": r[2],
                          "size_human": human_size(r[2]),
                          "mdate": time.strftime("%Y-%m-%d", time.localtime(r[3]))}
