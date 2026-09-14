@@ -4049,7 +4049,10 @@ function renderDedup(j) {
           <span class="waste">คืนได้ ${esc(g.waste_human)}</span></summary>
         <ul>${g.members.map(m => `<li><span class="badge drive">${esc(m.drive)}</span> ${esc(m.relpath)} <span class="muted">(${esc(m.mdate)})</span></li>`).join("")}</ul>
       </details>`).join("")}
-      <div class="readonly-note">โหมดอ่านอย่างเดียว — เว็บนี้ไม่ลบ/ย้ายไฟล์ ใช้รายการนี้ไปตัดสินใจเองบนเครื่อง</div>`;
+      <div class="readonly-note">จับคู่จาก <b>ชื่อไฟล์ + ขนาดเท่ากันเป๊ะ</b> — ไม่ได้เปิดอ่านเนื้อไฟล์
+        (ไม่ต้องเสียบไดรฟ์ถึงดูได้) ไฟล์คนละใบที่บังเอิญชื่อและขนาดตรงกันจึงติดมาได้
+        เช็กก่อนลบทุกครั้ง<br>
+        โหมดอ่านอย่างเดียว — เว็บนี้ไม่ลบ/ย้ายไฟล์ ใช้รายการนี้ไปตัดสินใจเองบนเครื่อง</div>`;
   } else if (j.status === "error") {
     box.className = "progress-box show err";
     box.textContent = "ผิดพลาด: " + j.error;
