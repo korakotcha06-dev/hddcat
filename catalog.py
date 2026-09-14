@@ -53,6 +53,7 @@ import difflib
 import webbrowser
 import zipfile
 import tempfile
+import unicodedata
 import urllib.request
 from collections import defaultdict
 
@@ -102,7 +103,9 @@ def get_conn(db_path):
 def scan_drive(db_path, drive_path, label, progress=None):
     """Core scan logic (shared by CLI and web UI). Opens its own connection so it
     can run in a background thread. Calls progress(count) every 5000 files.
-    Returns a stats dict; raises ValueError if drive_path is not a directory."""
+    Returns a stats dict; raises ValueError if drive_path is not a directory, or
+    if the drive disappears mid-scan - in which case the catalog is rolled back,
+    because a half-finished scan that looks finished is worse than no scan."""
     drive_path = os.path.abspath(drive_path)
     if not os.path.isdir(drive_path):
         raise ValueError(f"ไม่พบ path {drive_path}")
@@ -111,7 +114,20 @@ def scan_drive(db_path, drive_path, label, progress=None):
     conn.execute("DELETE FROM files WHERE drive_label=?", (label,))
     count = 0
     total_bytes = 0
-    for root, dirs, files in os.walk(drive_path):
+    unreadable = 0
+    unreadable_sample = []
+
+    def _unreadable(what):
+        # something we could not read: a folder os.walk could not open, or a
+        # file os.stat refused. Both used to be swallowed, so a scan stopped
+        # short by permissions reported a clean, complete-looking catalog.
+        nonlocal unreadable
+        unreadable += 1
+        if len(unreadable_sample) < 20:
+            unreadable_sample.append(what)
+
+    for root, dirs, files in os.walk(
+            drive_path, onerror=lambda e: _unreadable(getattr(e, "filename", None) or str(e))):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         for fname in files:
             if fname in SKIP_FILES:
@@ -120,8 +136,16 @@ def scan_drive(db_path, drive_path, label, progress=None):
             try:
                 st = os.stat(full)
             except OSError:
+                _unreadable(full)
                 continue
-            relpath = os.path.relpath(full, drive_path)
+            # HFS+ hands back decomposed names (e = e + combining acute) while
+            # APFS keeps whatever was typed, usually composed. Store one form or
+            # "Cafe_Wedding" copied between two drives is two different strings:
+            # invisible to the duplicate finder, and unfindable from a search box
+            # that composes. Thai is unaffected (no canonical decomposition);
+            # accented Latin, Japanese and Korean are the ones that bite.
+            relpath = unicodedata.normalize("NFC", os.path.relpath(full, drive_path))
+            fname = unicodedata.normalize("NFC", fname)
             parts = relpath.split(os.sep)
             depth1 = parts[0] if len(parts) > 1 else ""
             ext = os.path.splitext(fname)[1].lower()
@@ -133,11 +157,23 @@ def scan_drive(db_path, drive_path, label, progress=None):
             total_bytes += st.st_size
             if count % 5000 == 0 and progress:
                 progress(count)
+    if not os.path.isdir(drive_path):
+        # unplugged mid-scan: os.walk just stops early and we would happily
+        # write "scanned today, N files". Nothing is committed yet, so rolling
+        # back leaves the previous catalog for this drive exactly as it was.
+        conn.rollback()
+        conn.close()
+        raise ValueError(f"ไดรฟ์หายไประหว่างสแกน ({drive_path}) — catalog เดิมยังอยู่ครบ")
     try:
         usage = shutil.disk_usage(drive_path)
         disk_total, disk_free = usage.total, usage.free
     except OSError:
-        disk_total, disk_free = None, None
+        # keep the capacity we already knew rather than blanking it: NULL here
+        # drops the drive out of the move planner and the home page totals
+        row = conn.execute(
+            "SELECT total_bytes, free_bytes FROM drives WHERE drive_label=?",
+            (label,)).fetchone()
+        disk_total, disk_free = (row[0], row[1]) if row else (None, None)
     conn.execute("INSERT OR REPLACE INTO drives VALUES (?,?,?,?)",
                  (label, disk_total, disk_free, time.time()))
     # remember where the drive was mounted so "go to folder" can jump straight
@@ -146,7 +182,8 @@ def scan_drive(db_path, drive_path, label, progress=None):
     conn.commit()
     conn.close()
     return {"files": count, "bytes": total_bytes, "seconds": time.time() - t0,
-            "disk_total": disk_total, "disk_free": disk_free}
+            "disk_total": disk_total, "disk_free": disk_free,
+            "unreadable": unreadable, "unreadable_sample": unreadable_sample}
 
 
 def cmd_scan(args):
@@ -162,16 +199,34 @@ def cmd_scan(args):
     if res["disk_total"]:
         print(f"Drive capacity: {human_size(res['disk_total'])} total, {human_size(res['disk_free'])} free "
               f"({res['disk_free']/res['disk_total']*100:.0f}% free)")
+    if res["unreadable"]:
+        print(f"WARNING: อ่านไม่ได้ {res['unreadable']} รายการ - catalog ของไดรฟ์นี้ไม่ครบ")
+        for w in res["unreadable_sample"]:
+            print(f"  - {w}")
+        if res["unreadable"] > len(res["unreadable_sample"]):
+            print(f"  ... และอีก {res['unreadable'] - len(res['unreadable_sample'])} รายการ")
 
 
 def search_files(conn, keyword, limit=None):
-    """Shared search logic (CLI + web). Returns rows of (drive_label, relpath, size, mtime)."""
-    kw = f"%{keyword}%"
-    sql = ("SELECT drive_label, relpath, size, mtime FROM files "
-           "WHERE filename LIKE ? OR relpath LIKE ? ORDER BY drive_label, relpath")
+    """Shared search logic (CLI + web). Returns rows of (drive_label, relpath, size, mtime).
+
+    Matches both Unicode forms of the keyword: new scans store NFC, but a
+    catalog built before that still holds the NFD names an HFS+ drive reports,
+    and nobody should have to rescan 40 drives to find their own files."""
+    forms = [keyword]
+    for f in ("NFC", "NFD"):
+        n = unicodedata.normalize(f, keyword)
+        if n not in forms:
+            forms.append(n)
+    where = " OR ".join(["filename LIKE ? OR relpath LIKE ?"] * len(forms))
+    sql = (f"SELECT drive_label, relpath, size, mtime FROM files WHERE {where} "
+           "ORDER BY drive_label, relpath")
     if limit:
         sql += f" LIMIT {int(limit)}"
-    return conn.execute(sql, (kw, kw)).fetchall()
+    params = []
+    for f in forms:
+        params += [f"%{f}%", f"%{f}%"]
+    return conn.execute(sql, params).fetchall()
 
 
 def cmd_search(args):
@@ -944,6 +999,29 @@ def _cached(conn, name, build):
     return value
 
 
+def smart_folders_cached(conn):
+    """The smart library, memoised.
+
+    build_smart_folders reads every row in `files` and regroups them in Python.
+    On a 40-drive catalog that is seconds of work and a few hundred MB of rows,
+    and it ran on every page load, after every scan, after every drive removal
+    and on every MCP call. The answer only changes when the catalog changes,
+    which is exactly what _reclaim_cache_key already tracks.
+
+    Returns the unsorted rows; callers sort a copy, because sort_folders sorts
+    in place and would otherwise reorder the cached list under everyone else.
+    """
+    def build():
+        rows = conn.execute(
+            "SELECT drive_label, relpath, size, mtime FROM files").fetchall()
+        out = build_smart_folders(rows)
+        for d in out:
+            d["size_human"] = human_size(d["size"])
+        return out
+
+    return _cached(conn, "smart_folders", build)
+
+
 def _safe_date(mtime):
     """Formatted date, or None when the timestamp is impossible (see MTIME_FLOOR)."""
     if mtime is None or mtime < MTIME_FLOOR or mtime > time.time() + 86400:
@@ -1625,8 +1703,8 @@ def _mcp_drives(conn):
 
 
 def _mcp_projects(conn, drive=None, sort="size", limit=40):
-    rows = conn.execute("SELECT drive_label, relpath, size, mtime FROM files").fetchall()
-    folders = sort_folders(build_smart_folders(rows), sort if sort in ("client", "size") else "size")
+    folders = sort_folders(list(smart_folders_cached(conn)),
+                           sort if sort in ("client", "size") else "size")
     if drive:
         folders = [f for f in folders if f["drive"] == drive]
     total = len(folders)
@@ -3967,7 +4045,8 @@ async function pollJobs() {
     sbox.innerHTML = `เสร็จแล้ว: <b>${esc(s.label)}</b> —
       <div class="big">${s.files.toLocaleString()} ไฟล์ · ${esc(s.bytes_human)}</div>
       ใช้เวลา ${Math.round(s.seconds)} วินาที
-      ${s.disk_total ? `· พื้นที่ว่าง ${esc(s.disk_free_human)} / ${esc(s.disk_total_human)} (${s.pct_free}%)` : ""}`;
+      ${s.disk_total ? `· พื้นที่ว่าง ${esc(s.disk_free_human)} / ${esc(s.disk_total_human)} (${s.pct_free}%)` : ""}
+      ${s.unreadable ? `<div class="card-del-err">อ่านไม่ได้ ${s.unreadable.toLocaleString()} รายการ — catalog ของไดรฟ์นี้ไม่ครบ</div>` : ""}`;
     $("scan-btn").disabled = false;
     loadDrives(); loadFolders();
   } else if (s.status === "error" && $("scan-btn").disabled) {
@@ -4246,13 +4325,9 @@ def cmd_serve(args):
                     self._send(200, css, "text/css; charset=utf-8", no_store=True)
                 elif route == "/api/folders":
                     conn = get_conn(db_path)
-                    rows = conn.execute(
-                        "SELECT drive_label, relpath, size, mtime FROM files").fetchall()
-                    conn.close()
-                    out = sort_folders(build_smart_folders(rows),
+                    out = sort_folders(list(smart_folders_cached(conn)),
                                        q.get("sort", ["client"])[0])
-                    for d in out:
-                        d["size_human"] = human_size(d["size"])
+                    conn.close()
                     self._json({"ok": True, "rows": out})
                 elif route == "/api/drives":
                     conn = get_conn(db_path)
