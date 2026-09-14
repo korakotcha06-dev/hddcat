@@ -4193,8 +4193,41 @@ def cmd_serve(args):
             self._send(code, json.dumps(obj, ensure_ascii=False),
                        "application/json; charset=utf-8", no_store=True)
 
+        def _from_our_page(self, writing=False):
+            """Refuse anything that did not come from the UI we serve.
+
+            Binding to 127.0.0.1 keeps other machines out, but not a web page
+            the user already has open. DNS rebinding points evil.com at
+            127.0.0.1, after which the browser treats this server as the page's
+            own origin and can read /api/search - every filename and client name
+            on every cataloged drive. And a plain <form> POST is exempt from
+            preflight, so a page could fire /api/forget or /api/scan without
+            ever being allowed to read the reply.
+
+            Both need a Host header naming someone else, or a body no <form>
+            can send. The real UI always passes: it is loaded from loopback and
+            posts application/json.
+            """
+            port = self.server.server_address[1]
+            allowed = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+            if (self.headers.get("Host") or "").strip().lower() not in allowed:
+                self._json({"ok": False, "error": "ปฏิเสธ: Host ไม่ใช่เครื่องนี้"}, 403)
+                return False
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc.lower() not in allowed:
+                self._json({"ok": False, "error": "ปฏิเสธ: ข้ามโดเมน"}, 403)
+                return False
+            if writing:
+                ctype = (self.headers.get("Content-Type") or "").split(";")[0]
+                if ctype.strip().lower() != "application/json":
+                    self._json({"ok": False, "error": "ต้องเป็น application/json"}, 415)
+                    return False
+            return True
+
         def do_GET(self):
             try:
+                if not self._from_our_page():
+                    return
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
                 route = u.path
@@ -4356,20 +4389,30 @@ def cmd_serve(args):
                             "SELECT drive_label, last_scanned FROM drives")}
                         # which cataloged drives can we reach right now? drives the
                         # UI can "go to folder" on (cheap: unplugged ones fail isdir)
-                        for lbl in known:
+                        for lbl in sorted(known):
                             m = resolve_drive_mount(conn, lbl)
                             if m:
                                 mounted[lbl] = m
                         conn.close()
+                        # a drive is "known" because we can reach it at this mount
+                        # point -- not because its volume name happens to equal the
+                        # label the user typed. Matching on the name alone made any
+                        # drive labelled after its sticker look brand new on every
+                        # plug-in, and the toast then offered to scan it a second
+                        # time under a second label.
+                        by_path = {}
+                        for lbl, m in mounted.items():
+                            by_path.setdefault(os.path.normpath(m), lbl)
                         for v in sorted(os.listdir("/Volumes")):
                             if v.startswith("."):
                                 continue
                             full = os.path.join("/Volumes", v)
                             if os.path.islink(full):
                                 continue  # e.g. "Macintosh HD" firmlink to /
+                            lbl = v if v in known else by_path.get(os.path.normpath(full))
                             vols.append({"path": full, "name": v,
-                                         "known_label": v if v in known else None,
-                                         "last_scanned": known.get(v)})
+                                         "known_label": lbl,
+                                         "last_scanned": known.get(lbl)})
                     except OSError:
                         pass
                     self._json({"ok": True, "volumes": vols, "mounted": mounted})
@@ -4411,6 +4454,8 @@ def cmd_serve(args):
 
         def do_POST(self):
             try:
+                if not self._from_our_page(writing=True):
+                    return
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
                 if self.path == "/api/scan":
@@ -4610,7 +4655,7 @@ def main():
     sp.add_argument("--consolidate", action="store_true",
                      help="งานชื่อเดียวกันที่กระจายอยู่หลายไดรฟ์")
     sp.add_argument("--target-free", type=float, default=15.0,
-                     help="(--move-plan) อยากให้ทุกไดรฟ์เหลือที่ว่างกี่ % (default 15)")
+                     help="(--move-plan) อยากให้ทุกไดรฟ์เหลือที่ว่างกี่ %% (default 15)")
     sp.set_defaults(func=cmd_reclaim)
 
     sp = sub.add_parser("forget", help="ลบ drive ออกจาก catalog (ลบแค่ข้อมูลใน DB ไม่แตะไฟล์จริง)")
